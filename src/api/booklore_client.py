@@ -2254,19 +2254,22 @@ class BookloreClient:
 
         payload_variants = []
         if book_type == 'CBX':
-            # CBX has a native page-based progress model. Prefer it over the
-            # generic fileProgress payload so a KoSync page can round-trip through
-            # Grimmory instead of collapsing to page 1.
-            payload_variants.append((
-                "cbxProgress",
-                {
-                    "bookId": book_id,
-                    "cbxProgress": {
-                        "page": cbx_page or 1,
-                        "percentage": pct_display,
-                    },
+            cbx_payload = {
+                "bookId": book_id,
+                "cbxProgress": {
+                    "page": cbx_page or 1,
+                    "percentage": pct_display,
                 },
-            ))
+            }
+            if book_file_id is not None:
+                cbx_payload["fileProgress"] = {
+                    "bookFileId": self._to_optional_int(book_file_id) or book_file_id,
+                    "positionData": str(cbx_page or 1),
+                    "progressPercent": pct_display,
+                }
+                payload_variants.append(("cbxProgress+fileProgress", cbx_payload))
+            else:
+                payload_variants.append(("cbxProgress", cbx_payload))
         elif book_type in ('EPUB', 'PDF') and book_file_id is not None:
             file_progress = {
                 "bookFileId": self._to_optional_int(book_file_id) or book_file_id,
@@ -2388,6 +2391,37 @@ class BookloreClient:
                         last_status = f"verify_mismatch:{verified_pct * 100:.2f}%"
                         continue
 
+            if book_type == 'CBX':
+                time.sleep(0.25)
+                verified = self.get_progress_rich(ebook_filename)
+                if isinstance(verified, dict):
+                    verified_pct = verified.get('pct')
+                    verified_page = self._to_optional_int(verified.get('page'))
+                    logger.debug(
+                        "Grimmory CBX verify comparison: file=%s book_id=%s variant=%s expected_pct=%.2f%% observed_pct=%s expected_page=%s observed_page=%s",
+                        safe_filename,
+                        book_id,
+                        variant_name,
+                        pct_display,
+                        f"{float(verified_pct) * 100.0:.2f}%" if verified_pct is not None else "None",
+                        cbx_page or 1,
+                        verified_page,
+                    )
+                    pct_mismatch = verified_pct is not None and abs(float(verified_pct) - float(percentage)) > 0.005
+                    page_mismatch = verified_page is not None and verified_page != (cbx_page or 1)
+                    if pct_mismatch or page_mismatch:
+                        logger.warning(
+                            "Grimmory CBX write did not persist target for %s (variant=%s, expected=%.2f%% page=%s, observed=%s page=%s)",
+                            safe_filename,
+                            variant_name,
+                            pct_display,
+                            cbx_page or 1,
+                            f"{float(verified_pct) * 100.0:.2f}%" if verified_pct is not None else "None",
+                            verified_page,
+                        )
+                        last_status = f"verify_cbx_mismatch:{verified_page}:{verified_pct}"
+                        continue
+
             logger.info(f"Grimmory: {safe_filename} -> {pct_display:.1f}%")
 
             # Update cache in-place instead of full library refresh
@@ -2410,6 +2444,7 @@ class BookloreClient:
                         elif book_type == 'CBX':
                             if not cached.get('cbxProgress'):
                                 cached['cbxProgress'] = {}
+                            cached['cbxProgress']['page'] = cbx_page or 1
                             cached['cbxProgress']['percentage'] = pct_display
                         logger.debug(f"Grimmory: Cache updated in-place for book {book_id}")
             except Exception:
