@@ -44,6 +44,7 @@ jobs:
             type=raw,value=cbx-progress-sync
             type=sha,prefix=cbx-progress-sync-
 
+      # This branch image is intentionally rebuilt after each test-fix commit.
       - name: Build and push CPU image
         uses: docker/build-push-action@v6
         with:
