@@ -28,83 +28,15 @@ jobs:
           python - <<'PY'
           from pathlib import Path
 
-          def replace_once(path, old, new):
-              p = Path(path)
-              text = p.read_text()
-              count = text.count(old)
-              if count != 1:
-                  raise RuntimeError(f"{path}: expected one match, found {count} for {old[:120]!r}")
-              p.write_text(text.replace(old, new, 1))
+          p = Path('src/api/booklore_client.py')
+          text = p.read_text()
 
-          # BookLore sync adapter: if the fixed-page locator was lost, reconstruct
-          # the concrete CBZ page from the leader percentage instead of writing page 1.
-          replace_once(
-              'src/sync_clients/booklore_sync_client.py',
-              '    coerce_page,\n    is_cbz_filename,',
-              '    coerce_page,\n    estimate_cbz_page,\n    is_cbz_filename,'
-          )
-          replace_once(
-              'src/sync_clients/booklore_sync_client.py',
-              '''            if page is None and getattr(locator, "cfi", None) == FIXED_PAGE_LOCATOR_CFI:
-                  page = coerce_page(getattr(locator, "fragment", None))
-              canonical_pct = percentage_from_cbz_page(self.ebook_parser, epub, page)
-          ''',
-              '''            if page is None and getattr(locator, "cfi", None) == FIXED_PAGE_LOCATOR_CFI:
-                  page = coerce_page(getattr(locator, "fragment", None))
-              if page is None and pct is not None and float(pct) > 0.0:
-                  page = estimate_cbz_page(self.ebook_parser, epub, pct)
-                  if page is not None:
-                      logger.info(
-                          "Derived outgoing Grimmory CBZ page for '%s' from %.2f%% -> page %s",
-                          epub, float(pct) * 100.0, page,
-                      )
-              canonical_pct = percentage_from_cbz_page(self.ebook_parser, epub, page)
-          '''
-          )
-          replace_once(
-              'src/sync_clients/booklore_sync_client.py',
-              '''        updated_state = {
-              'pct': pct
-          }
-          if not is_cbz_filename(epub) and locator and locator.cfi:
-              updated_state['cfi'] = locator.cfi
-          ''',
-              '''        updated_state = {
-              'pct': pct
-          }
-          if is_cbz_filename(epub):
-              updated_page = coerce_page(getattr(locator, "fragment", None)) if locator else None
-              if updated_page is not None:
-                  updated_state['page'] = updated_page
-          elif locator and locator.cfi:
-              updated_state['cfi'] = locator.cfi
-          '''
-          )
-
-          # Grimmory itself saves CBX progress with both cbxProgress and fileProgress
-          # when a primary book file id is known. Mirror that first-party payload;
-          # keep legacy cbxProgress as a compatibility fallback.
-          replace_once(
-              'src/api/booklore_client.py',
-              '''        if book_type == 'CBX':
-              # CBX has a native page-based progress model. Prefer it over the
-              # generic fileProgress payload so a KoSync page can round-trip through
-              # Grimmory instead of collapsing to page 1.
-              payload_variants.append((
-                  "cbxProgress",
-                  {
-                      "bookId": book_id,
-                      "cbxProgress": {
-                          "page": cbx_page or 1,
-                          "percentage": pct_display,
-                      },
-                  },
-              ))
-          ''',
-              '''        if book_type == 'CBX':
-              # Match Grimmory's own CBX reader payload. Modern Grimmory stores
-              # reader position at file level and its UI may prefer that state over
-              # legacy cbxProgress, so send both when the primary file id is known.
+          # Replace only the CBX payload block. Grimmory's own web reader sends
+          # both cbxProgress and fileProgress for CBX when a primary file id is
+          # available; mirror that shape so both book-level and file-level state move.
+          start = text.index("        if book_type == 'CBX':\n", text.index('        payload_variants = []'))
+          end = text.index("        elif book_type in ('EPUB', 'PDF')", start)
+          new_block = '''        if book_type == 'CBX':
               cbx_payload = {
                   "bookId": book_id,
                   "cbxProgress": {
@@ -119,122 +51,72 @@ jobs:
                       "progressPercent": pct_display,
                   }
                   payload_variants.append(("cbxProgress+fileProgress", cbx_payload))
-                  payload_variants.append((
-                      "cbxProgress",
-                      {
-                          "bookId": book_id,
-                          "cbxProgress": {
-                              "page": cbx_page or 1,
-                              "percentage": pct_display,
-                          },
-                      },
-                  ))
               else:
                   payload_variants.append(("cbxProgress", cbx_payload))
-          '''
-          )
+'''
+          text = text[:start] + new_block + text[end:]
 
-          # Verify CBX writes too. Previously any HTTP 204 was treated as success,
-          # even when the Grimmory reader state visible on the next GET stayed old.
-          replace_once(
-              'src/api/booklore_client.py',
-              '''                elif verified_pct is not None:
-                  if abs(verified_pct - percentage) > 0.005:
-                      if variant_name == "with_cfi":
-                          with_cfi_failed = True
-                      logger.warning(
-                          f"Grimmory progress write mismatch for {safe_filename} "
-                          f"(variant={variant_name}, expected={pct_display:.2f}%, observed={verified_pct * 100:.2f}%). Retrying..."
-                      )
-                      last_status = f"verify_mismatch:{verified_pct * 100:.2f}%"
-                      continue
-
-              logger.info(f"Grimmory: {safe_filename} -> {pct_display:.1f}%")
-          ''',
-              '''                elif verified_pct is not None:
-                  if abs(verified_pct - percentage) > 0.005:
-                      if variant_name == "with_cfi":
-                          with_cfi_failed = True
-                      logger.warning(
-                          f"Grimmory progress write mismatch for {safe_filename} "
-                          f"(variant={variant_name}, expected={pct_display:.2f}%, observed={verified_pct * 100:.2f}%). Retrying..."
-                      )
-                      last_status = f"verify_mismatch:{verified_pct * 100:.2f}%"
-                      continue
-            elif book_type == 'CBX':
-              time.sleep(0.25)
-              verified = self.get_progress_rich(ebook_filename)
-              if isinstance(verified, dict):
-                  verified_pct = verified.get('pct')
-                  verified_page = self._to_optional_int(verified.get('page'))
-                  logger.debug(
-                      "Grimmory CBX verify comparison: file=%s book_id=%s variant=%s "
-                      "expected_pct=%.2f%% observed_pct=%s expected_page=%s observed_page=%s",
-                      safe_filename,
-                      book_id,
-                      variant_name,
-                      pct_display,
-                      f"{float(verified_pct) * 100.0:.2f}%" if verified_pct is not None else "None",
-                      cbx_page or 1,
-                      verified_page,
-                  )
-                  pct_mismatch = (
-                      verified_pct is not None
-                      and abs(float(verified_pct) - float(percentage)) > 0.005
-                  )
-                  page_mismatch = (
-                      verified_page is not None
-                      and verified_page != (cbx_page or 1)
-                  )
-                  if pct_mismatch or page_mismatch:
-                      logger.warning(
-                          "Grimmory CBX write did not persist target for %s "
-                          "(variant=%s, expected=%.2f%% page=%s, observed=%s page=%s). Retrying...",
+          # Verify CBX writes just like EPUB writes. An HTTP 204 is not enough:
+          # immediately GET the book again and confirm both page and percentage.
+          verify_anchor = "            logger.info(f\"Grimmory: {safe_filename} -> {pct_display:.1f}%\")\n"
+          verify_pos = text.index(verify_anchor, text.index('            # Verify EPUB writes'))
+          cbx_verify = '''            if book_type == 'CBX':
+                  time.sleep(0.25)
+                  verified = self.get_progress_rich(ebook_filename)
+                  if isinstance(verified, dict):
+                      verified_pct = verified.get('pct')
+                      verified_page = self._to_optional_int(verified.get('page'))
+                      logger.debug(
+                          "Grimmory CBX verify comparison: file=%s book_id=%s variant=%s expected_pct=%.2f%% observed_pct=%s expected_page=%s observed_page=%s",
                           safe_filename,
+                          book_id,
                           variant_name,
                           pct_display,
-                          cbx_page or 1,
                           f"{float(verified_pct) * 100.0:.2f}%" if verified_pct is not None else "None",
+                          cbx_page or 1,
                           verified_page,
                       )
-                      last_status = f"verify_cbx_mismatch:{verified_page}:{verified_pct}"
-                      continue
+                      pct_mismatch = verified_pct is not None and abs(float(verified_pct) - float(percentage)) > 0.005
+                      page_mismatch = verified_page is not None and verified_page != (cbx_page or 1)
+                      if pct_mismatch or page_mismatch:
+                          logger.warning(
+                              "Grimmory CBX write did not persist target for %s (variant=%s, expected=%.2f%% page=%s, observed=%s page=%s)",
+                              safe_filename,
+                              variant_name,
+                              pct_display,
+                              cbx_page or 1,
+                              f"{float(verified_pct) * 100.0:.2f}%" if verified_pct is not None else "None",
+                              verified_page,
+                          )
+                          last_status = f"verify_cbx_mismatch:{verified_page}:{verified_pct}"
+                          continue
 
-              logger.info(f"Grimmory: {safe_filename} -> {pct_display:.1f}%")
-          '''
+'''
+          text = text[:verify_pos] + cbx_verify + text[verify_pos:]
+
+          # Keep the in-memory CBX cache complete too.
+          old_cache = "                            cached['cbxProgress']['percentage'] = pct_display\n"
+          cache_pos = text.index(old_cache, text.index("elif book_type == 'CBX':", verify_pos))
+          text = (
+              text[:cache_pos]
+              + "                            cached['cbxProgress']['page'] = cbx_page or 1\n"
+              + old_cache
+              + text[cache_pos + len(old_cache):]
           )
 
-          # Keep the in-memory cache consistent with the actual fixed page too.
-          replace_once(
-              'src/api/booklore_client.py',
-              '''                        elif book_type == 'CBX':
-                          if not cached.get('cbxProgress'):
-                              cached['cbxProgress'] = {}
-                          cached['cbxProgress']['percentage'] = pct_display
-          ''',
-              '''                        elif book_type == 'CBX':
-                          if not cached.get('cbxProgress'):
-                              cached['cbxProgress'] = {}
-                          cached['cbxProgress']['page'] = cbx_page or 1
-                          cached['cbxProgress']['percentage'] = pct_display
-          '''
-          )
+          p.write_text(text)
           PY
 
       - name: Validate patch
         run: |
-          python -m py_compile \
-            src/sync_clients/booklore_sync_client.py \
-            src/api/booklore_client.py
+          python -m py_compile src/api/booklore_client.py
           python - <<'PY'
           from pathlib import Path
           text = Path('src/api/booklore_client.py').read_text()
           assert 'cbxProgress+fileProgress' in text
           assert '"positionData": str(cbx_page or 1)' in text
           assert 'Grimmory CBX verify comparison' in text
-          sync = Path('src/sync_clients/booklore_sync_client.py').read_text()
-          assert 'estimate_cbz_page(self.ebook_parser, epub, pct)' in sync
-          assert "updated_state['page'] = updated_page" in sync
+          assert "cached['cbxProgress']['page'] = cbx_page or 1" in text
           PY
 
       - name: Commit patch and remove one-shot workflow
@@ -242,6 +124,6 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git rm .github/workflows/apply-grimmory-cbx-file-progress-fix.yml
-          git add src/api/booklore_client.py src/sync_clients/booklore_sync_client.py
+          git add src/api/booklore_client.py
           git commit -m "Fix Grimmory CBX reader progress writes"
           git push origin HEAD:fix/cbx-progress-sync
