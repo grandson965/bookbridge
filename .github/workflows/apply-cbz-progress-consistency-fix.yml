@@ -1,0 +1,320 @@
+name: Apply CBZ progress consistency fix
+
+on:
+  push:
+    branches:
+      - fix/cbx-progress-sync
+    paths:
+      - .github/workflows/apply-cbz-progress-consistency-fix.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/cbx-progress-sync
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Apply targeted CBZ fixes
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          def replace_once(path, old, new):
+              p = Path(path)
+              text = p.read_text()
+              count = text.count(old)
+              if count != 1:
+                  raise RuntimeError(f"{path}: expected one match, found {count}")
+              p.write_text(text.replace(old, new, 1))
+
+          # 1. Make page count/page-derived percentage reusable and canonical.
+          p = Path('src/utils/fixed_page_progress.py')
+          text = p.read_text()
+          marker = 'def estimate_cbz_page(ebook_parser, filename: Optional[str], percentage: float) -> Optional[int]:\n'
+          idx = text.find(marker)
+          if idx < 0:
+              raise RuntimeError('fixed_page_progress.py: estimate_cbz_page marker not found')
+          text = text[:idx] + '''def count_cbz_pages(ebook_parser, filename: Optional[str]) -> Optional[int]:
+              """Return the number of image pages in a CBZ without EPUB parsing."""
+              if not is_cbz_filename(filename) or ebook_parser is None:
+                  return None
+
+              try:
+                  candidate = Path(str(filename))
+                  path = candidate if candidate.exists() else ebook_parser.resolve_book_path(filename)
+                  if path is None:
+                      return None
+                  with zipfile.ZipFile(path) as archive:
+                      page_count = sum(
+                          1
+                          for info in archive.infolist()
+                          if not info.is_dir()
+                          and Path(info.filename).suffix.lower() in _CBZ_IMAGE_EXTENSIONS
+                      )
+              except (OSError, zipfile.BadZipFile, RuntimeError, ValueError):
+                  return None
+
+              return page_count if page_count > 0 else None
+
+
+          def percentage_from_cbz_page(ebook_parser, filename: Optional[str], page) -> Optional[float]:
+              """Return canonical 0..1 progress for a 1-based CBZ page."""
+              page = coerce_page(page)
+              page_count = count_cbz_pages(ebook_parser, filename)
+              if page is None or not page_count:
+                  return None
+              page = max(1, min(page_count, page))
+              return page / float(page_count)
+
+
+          def estimate_cbz_page(ebook_parser, filename: Optional[str], percentage: float) -> Optional[int]:
+              """Estimate a 1-based CBZ page from a 0..1 percentage."""
+              page_count = count_cbz_pages(ebook_parser, filename)
+              if not page_count:
+                  return None
+
+              try:
+                  pct = max(0.0, min(1.0, float(percentage)))
+              except (TypeError, ValueError):
+                  return None
+
+              page = int(round(pct * page_count))
+              return max(1, min(page_count, page))
+          '''
+          p.write_text(text)
+
+          # 2. Grimmory: trust concrete CBX page when its percentage disagrees.
+          replace_once(
+              'src/sync_clients/booklore_sync_client.py',
+              '''from src.utils.fixed_page_progress import (
+              FIXED_PAGE_LOCATOR_CFI,
+              is_cbz_filename,
+              marker_text,
+              page_from_marker_text,
+          )''',
+              '''from src.utils.fixed_page_progress import (
+              FIXED_PAGE_LOCATOR_CFI,
+              coerce_page,
+              is_cbz_filename,
+              marker_text,
+              page_from_marker_text,
+              percentage_from_cbz_page,
+          )'''
+          )
+
+          replace_once(
+              'src/sync_clients/booklore_sync_client.py',
+              '''        if bl_pct is None:
+              logger.debug("Grimmory percentage is None - returning no service state")
+              return None
+
+          # Get previous BookLore state''',
+              '''        if is_cbz_filename(epub) and rich is not None:
+              page = coerce_page(rich.get("page"))
+              canonical_pct = percentage_from_cbz_page(self.ebook_parser, epub, page)
+              if canonical_pct is not None and (bl_pct is None or float(bl_pct) > 0.0):
+                  if bl_pct is not None and abs(float(bl_pct) - canonical_pct) > 0.005:
+                      logger.warning(
+                          "Grimmory CBZ progress mismatch for '%s': reported=%.2f%%, page=%s -> canonical=%.2f%%; using page-derived progress",
+                          epub,
+                          float(bl_pct) * 100.0,
+                          page,
+                          canonical_pct * 100.0,
+                      )
+                  bl_pct = canonical_pct
+                  rich["page"] = page
+
+          if bl_pct is None:
+              logger.debug("Grimmory percentage is None - returning no service state")
+              return None
+
+          # Get previous BookLore state'''
+          )
+
+          replace_once(
+              'src/sync_clients/booklore_sync_client.py',
+              '''        if is_cbz_filename(epub):
+              page = page_from_marker_text(getattr(request, "txt", None))
+              if page is None and getattr(locator, "cfi", None) == FIXED_PAGE_LOCATOR_CFI:
+                  page = getattr(locator, "fragment", None)
+              locator = LocatorResult(
+                  percentage=pct,
+                  fragment=str(page) if page is not None else None,
+              )
+
+          success = self.booklore_client.update_progress(epub, pct, locator)''',
+              '''        if is_cbz_filename(epub):
+              page = page_from_marker_text(getattr(request, "txt", None))
+              if page is None and getattr(locator, "cfi", None) == FIXED_PAGE_LOCATOR_CFI:
+                  page = coerce_page(getattr(locator, "fragment", None))
+              canonical_pct = percentage_from_cbz_page(self.ebook_parser, epub, page)
+              if canonical_pct is not None and pct is not None and float(pct) > 0.0:
+                  if abs(float(pct) - canonical_pct) > 0.005:
+                      logger.warning(
+                          "Correcting outgoing Grimmory CBZ progress for '%s': requested=%.2f%%, page=%s -> canonical=%.2f%%",
+                          epub,
+                          float(pct) * 100.0,
+                          page,
+                          canonical_pct * 100.0,
+                      )
+                  pct = canonical_pct
+              locator = LocatorResult(
+                  percentage=pct,
+                  fragment=str(page) if page is not None else None,
+              )
+
+          success = self.booklore_client.update_progress(epub, pct, locator)'''
+          )
+
+          # 3. KoSync: apply the same invariant on reads and writes so an existing
+          #    pct=100/page=16 state self-heals instead of being propagated.
+          replace_once(
+              'src/sync_clients/kosync_sync_client.py',
+              '''    coerce_page,
+              estimate_cbz_page,
+              is_cbz_filename,
+              marker_text,
+              page_from_marker_text,
+          )''',
+              '''    coerce_page,
+              estimate_cbz_page,
+              is_cbz_filename,
+              marker_text,
+              page_from_marker_text,
+              percentage_from_cbz_page,
+          )'''
+          )
+
+          replace_once(
+              'src/sync_clients/kosync_sync_client.py',
+              '''        else:
+              ko_pct, ko_xpath = self.kosync_client.get_progress(ko_id)
+              book_label = f"'{title_snip}' " if title_snip else ""
+              if ko_pct is None:''',
+              '''        else:
+              ko_pct, ko_xpath = self.kosync_client.get_progress(ko_id)
+
+          epub = getattr(book, "original_ebook_filename", None) or getattr(book, "ebook_filename", None)
+          if is_cbz_filename(epub):
+              page = coerce_page(ko_xpath)
+              canonical_pct = percentage_from_cbz_page(self.ebook_parser, epub, page)
+              if canonical_pct is not None and ko_pct is not None and float(ko_pct) > 0.0:
+                  if abs(float(ko_pct) - canonical_pct) > 0.005:
+                      logger.warning(
+                          "KoSync CBZ progress mismatch for '%s': reported=%.2f%%, page=%s -> canonical=%.2f%%; using page-derived progress",
+                          epub,
+                          float(ko_pct) * 100.0,
+                          page,
+                          canonical_pct * 100.0,
+                      )
+                  ko_pct = canonical_pct
+
+          book_label = f"'{title_snip}' " if title_snip else ""
+          if ko_pct is None:'''
+          )
+
+          replace_once(
+              'src/sync_clients/kosync_sync_client.py',
+              '''            if pct is not None and pct <= 0:
+                  page_progress = "1"
+              elif page is not None:
+                  page_progress = str(page)''',
+              '''            if pct is not None and pct <= 0:
+                  page_progress = "1"
+              elif page is not None:
+                  canonical_pct = percentage_from_cbz_page(self.ebook_parser, epub, page)
+                  if canonical_pct is not None:
+                      if pct is not None and abs(float(pct) - canonical_pct) > 0.005:
+                          logger.warning(
+                              "Correcting outgoing KoSync CBZ progress for '%s': requested=%.2f%%, page=%s -> canonical=%.2f%%",
+                              epub,
+                              float(pct) * 100.0,
+                              page,
+                              canonical_pct * 100.0,
+                          )
+                      pct = canonical_pct
+                  page_progress = str(page)'''
+          )
+
+          # 4. Never warm the EPUB text parser for CBZ ebook-only mappings.
+          replace_once(
+              'src/sync_manager.py',
+              '''                # Warm parser caches for subsequent locator-based sync cycles.
+              self.ebook_parser.extract_text_and_map(epub_path)
+              update_progress(1.0, 3)''',
+              '''                # Reflowable ebooks benefit from a warm text/locator cache. CBZ is
+              # fixed-page and must never be handed to ebooklib's EPUB parser.
+              if is_cbz_filename(epub_path.name):
+                  logger.info(
+                      f"Ebook-only background prep: skipping EPUB parser warmup for CBZ '{sanitize_log_data(epub_path.name)}'"
+                  )
+              else:
+                  self.ebook_parser.extract_text_and_map(epub_path)
+              update_progress(1.0, 3)'''
+          )
+
+          replace_once(
+              'src/sync_manager.py',
+              'logger.info(f"🔍 Found EPUB via parser resolver: {parser_path}")',
+              'logger.info(f"🔍 Found ebook via path resolver: {parser_path}")'
+          )
+
+          # Defensive guard: a percentage-only CBZ fallback should not enter CFI hydration.
+          replace_once(
+              'src/sync_manager.py',
+              '''                if not locator.cfi and any(name in config for name in _CFI_DEPENDENT_CLIENTS):
+                  hydrated_locator = self._hydrate_cfi_locator(''',
+              '''                if (not is_cbz_filename(epub) and not locator.cfi
+                      and any(name in config for name in _CFI_DEPENDENT_CLIENTS)):
+                  hydrated_locator = self._hydrate_cfi_locator('''
+          )
+          PY
+
+      - name: Validate syntax and CBZ page math
+        run: |
+          python -m py_compile \
+            src/utils/fixed_page_progress.py \
+            src/sync_clients/booklore_sync_client.py \
+            src/sync_clients/kosync_sync_client.py \
+            src/sync_manager.py
+          python - <<'PY'
+          import tempfile
+          import zipfile
+          from pathlib import Path
+          from src.utils.fixed_page_progress import count_cbz_pages, percentage_from_cbz_page, estimate_cbz_page
+
+          class Parser:
+              def __init__(self, path): self.path = path
+              def resolve_book_path(self, _): return self.path
+
+          with tempfile.TemporaryDirectory() as tmp:
+              cbz = Path(tmp) / 'amoras.cbz'
+              with zipfile.ZipFile(cbz, 'w') as zf:
+                  for page in range(1, 59):
+                      zf.writestr(f'{page:03}.jpg', b'x')
+                  zf.writestr('ComicInfo.xml', b'<ComicInfo/>')
+              parser = Parser(cbz)
+              assert count_cbz_pages(parser, 'amoras.cbz') == 58
+              pct = percentage_from_cbz_page(parser, 'amoras.cbz', 16)
+              assert abs(pct - (16 / 58)) < 1e-12
+              assert estimate_cbz_page(parser, 'amoras.cbz', pct) == 16
+          PY
+
+      - name: Commit fix and remove one-shot workflow
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git rm .github/workflows/apply-cbz-progress-consistency-fix.yml
+          git add src/utils/fixed_page_progress.py src/sync_clients/booklore_sync_client.py src/sync_clients/kosync_sync_client.py src/sync_manager.py
+          git commit -m "Fix CBZ page progress consistency"
+          git push origin HEAD:fix/cbx-progress-sync
