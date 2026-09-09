@@ -9,13 +9,21 @@ from lxml import html
 from src.api.api_clients import KoSyncClient
 from src.db.models import Book, State
 from src.utils.ebook_utils import EbookParser
+from src.utils.fixed_page_progress import (
+    FIXED_PAGE_LOCATOR_CFI,
+    coerce_page,
+    estimate_cbz_page,
+    is_cbz_filename,
+    marker_text,
+    page_from_marker_text,
+)
 from src.utils.config_loader import env_truthy
 from src.utils.kosync_canonical import (
     prewarm_xpath_order_cache,
     resolve_canonical_position,
 )
 from src.utils.progress_metadata import parse_service_timestamp
-from src.sync_clients.sync_client_interface import SyncClient, SyncResult, UpdateProgressRequest, ServiceState
+from src.sync_clients.sync_client_interface import LocatorResult, SyncClient, SyncResult, UpdateProgressRequest, ServiceState
 
 logger = logging.getLogger(__name__)
 
@@ -107,6 +115,8 @@ class KoSyncSyncClient(SyncClient):
         ko_xpath = state.current.get('xpath')
         ko_pct = state.current.get('pct')
         epub = getattr(book, "original_ebook_filename", None) or getattr(book, "ebook_filename", None)
+        if is_cbz_filename(epub):
+            return marker_text(ko_xpath)
         if ko_xpath and epub:
             txt = self.ebook_parser.resolve_xpath(epub, ko_xpath)
             if txt:
@@ -114,6 +124,16 @@ class KoSyncSyncClient(SyncClient):
         if ko_pct is not None and epub:
             return self.ebook_parser.get_text_at_percentage(epub, ko_pct)
         return None
+
+    def get_locator_from_text(self, txt: str, epub_file_name: str, hint_percentage: float) -> Optional[LocatorResult]:
+        if is_cbz_filename(epub_file_name) and isinstance(txt, str) and txt.startswith("__bookbridge_fixed_page__"):
+            page = page_from_marker_text(txt)
+            return LocatorResult(
+                percentage=hint_percentage,
+                cfi=FIXED_PAGE_LOCATOR_CFI,
+                fragment=str(page) if page is not None else None,
+            )
+        return super().get_locator_from_text(txt, epub_file_name, hint_percentage)
 
     def _sanitize_kosync_xpath(self, xpath: Optional[str], pct: float) -> Optional[str]:
         # Clear-progress flows intentionally send no XPath.
@@ -307,6 +327,34 @@ class KoSyncSyncClient(SyncClient):
             if book
             else None
         )
+        if is_cbz_filename(epub):
+            locator = request.locator_result
+            page = None
+            if getattr(locator, "cfi", None) == FIXED_PAGE_LOCATOR_CFI:
+                page = coerce_page(getattr(locator, "fragment", None))
+            if page is None:
+                page = page_from_marker_text(getattr(request, "txt", None))
+            if page is None and pct is not None and pct > 0:
+                page = estimate_cbz_page(self.ebook_parser, epub, pct)
+
+            if pct is not None and pct <= 0:
+                page_progress = "1"
+            elif page is not None:
+                page_progress = str(page)
+            else:
+                logger.warning(
+                    "Skipping KoSync CBZ update due to unresolvable page for '%s'",
+                    book.abs_title if book else "unknown",
+                )
+                return SyncResult(
+                    location=pct,
+                    success=False,
+                    updated_state={'pct': pct, 'xpath': None, 'skipped': True},
+                )
+
+            success = self.kosync_client.update_progress(ko_id, pct, page_progress)
+            return SyncResult(pct, success, {'pct': pct, 'xpath': page_progress})
+
         # Always collapse generated KoSync positions to block-level XPointers.
         # Text-node and inline offsets can resolve poorly in KOReader/CREngine,
         # while paragraph-level anchors survive renderer differences better.

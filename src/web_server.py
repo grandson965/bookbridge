@@ -3009,7 +3009,7 @@ def get_searchable_ebooks(search_term):
             if books:
                 for b in books:
                     fname = b.get('fileName', '')
-                    if fname.lower().endswith('.epub'):
+                    if fname.lower().endswith(('.epub', '.cbz')):
                         found_filenames.add(fname.lower())
                         found_stems.add(Path(fname).stem.lower())
                         results.append(EbookResult(
@@ -4902,9 +4902,9 @@ def _browser_cover_url(
     ebook_src = (ebook_source or "").strip()
     ebook_id = (ebook_source_id or "").strip()
     if ebook_id:
-        if ebook_src == "BookLore":
+        if ebook_src.lower() in ("booklore", "grimmory"):
             return f"/api/booklore/audiobook-cover/{ebook_id}"
-        if ebook_src == "BookOrbit":
+        if ebook_src.lower() == "bookorbit":
             return f"/api/bookorbit/audiobook-cover/{ebook_id}"
     return ""
 
@@ -5640,7 +5640,7 @@ def forge_search_text():
             if books:
                 for b in books:
                     fname = b.get('fileName', '')
-                    if fname.lower().endswith('.epub'):
+                    if fname.lower().endswith(('.epub', '.cbz')):
                         key = f"booklore_{b.get('id', fname)}"
                         if key not in found_ids:
                             found_ids.add(key)

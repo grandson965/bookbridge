@@ -55,6 +55,7 @@ from src.utils.transcription_cancel import (
 from src.utils.transcriber import TranscriptionCancelled
 from src.utils.logging_utils import sanitize_log_data
 from src.utils.progress_metadata import state_metadata_kwargs
+from src.utils.fixed_page_progress import is_cbz_filename
 
 # Service imports
 from src.services.alignment_service import AlignmentService, ingest_storyteller_transcripts
@@ -3774,7 +3775,8 @@ class SyncManager:
                 # Calculate char_delta = int(state.delta * total_chars)
                 # If char_delta >= self.delta_chars_thresh, log it and set significant_diff = True
                 char_delta_triggered = False  # Track if character delta triggered significance
-                if not significant_diff and hasattr(book, 'ebook_filename') and book.ebook_filename:
+                if (not significant_diff and hasattr(book, 'ebook_filename') and book.ebook_filename
+                        and not is_cbz_filename(getattr(book, 'original_ebook_filename', None) or book.ebook_filename)):
                     for client_name_key, client_state in config.items():
                          percentage_delta = self._state_percentage_delta(client_state)
                          if percentage_delta > 0:

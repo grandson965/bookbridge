@@ -1986,6 +1986,8 @@ class BookloreClient:
             "pct": self._to_progress_fraction(progress.get('percentage', 0)),
             "cfi": progress.get('cfi') if book_type == 'EPUB' else None,
             "href": progress.get('href') if book_type == 'EPUB' else None,
+            "page": self._to_optional_int(progress.get('page')) if book_type == 'CBX' else None,
+            "book_type": book_type,
             "last_read_time": data.get('lastReadTime'),
             "status": data.get('readStatus'),
             "content_source_pct": progress.get('contentSourceProgressPercent'),
@@ -1993,7 +1995,13 @@ class BookloreClient:
 
     def get_audiobook_cover_bytes(self, book_id):
         response = self._make_request("GET", f"/api/v1/audiobooks/{book_id}/cover")
-        if not response or response.status_code != 200:
+        if response is not None and response.status_code == 200:
+            return response.content, response.headers.get('Content-Type', 'image/jpeg')
+
+        # Ebook-only mappings (including CBX) have a normal Grimmory book cover,
+        # not an audiobook cover. The web proxy already has the book id available.
+        response = self._make_request("GET", f"/api/v1/media/book/{book_id}/cover")
+        if response is None or response.status_code != 200:
             return None, None
         return response.content, response.headers.get('Content-Type', 'image/jpeg')
 
@@ -2236,11 +2244,30 @@ class BookloreClient:
         clear_reset = book_type == 'EPUB' and percentage <= 0
         cfi = rich_locator.cfi if rich_locator and rich_locator.cfi else None
         href = rich_locator.href if rich_locator and rich_locator.href else None
+        cbx_page = (
+            self._to_optional_int(getattr(rich_locator, 'fragment', None))
+            if rich_locator and book_type == 'CBX'
+            else None
+        )
         primary_file = book.get('primaryFile') or {}
         book_file_id = primary_file.get('id')
 
         payload_variants = []
-        if book_type in ('EPUB', 'PDF', 'CBX') and book_file_id is not None:
+        if book_type == 'CBX':
+            # CBX has a native page-based progress model. Prefer it over the
+            # generic fileProgress payload so a KoSync page can round-trip through
+            # Grimmory instead of collapsing to page 1.
+            payload_variants.append((
+                "cbxProgress",
+                {
+                    "bookId": book_id,
+                    "cbxProgress": {
+                        "page": cbx_page or 1,
+                        "percentage": pct_display,
+                    },
+                },
+            ))
+        elif book_type in ('EPUB', 'PDF') and book_file_id is not None:
             file_progress = {
                 "bookFileId": self._to_optional_int(book_file_id) or book_file_id,
                 "progressPercent": pct_display,
