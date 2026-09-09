@@ -4,7 +4,8 @@ KOReader stores ``progress`` as a page number for documents with ``has_pages``
 (e.g. CBZ), while reflowable EPUB documents store an XPointer.  BookBridge's
 normal ebook locator pipeline is EPUB/text based, so page-based documents need
 a small marker that lets the sync clients bypass that parser path while the
-sync manager continues to pass a LocatorResult between clients.
+sync manager continues to pass a LocatorResult between clients. For CBZ files,
+the concrete page number is authoritative when a stored percentage disagrees.
 """
 
 from pathlib import Path
