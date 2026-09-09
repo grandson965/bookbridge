@@ -7,9 +7,11 @@ from src.db.models import Book, State
 from src.utils.ebook_utils import EbookParser
 from src.utils.fixed_page_progress import (
     FIXED_PAGE_LOCATOR_CFI,
+    coerce_page,
     is_cbz_filename,
     marker_text,
     page_from_marker_text,
+    percentage_from_cbz_page,
 )
 from src.utils.progress_metadata import parse_service_timestamp
 from src.sync_clients.sync_client_interface import (
@@ -80,6 +82,17 @@ class BookloreSyncClient(SyncClient):
         else:
             bl_pct, bl_cfi = self.booklore_client.get_progress(epub)
 
+        if is_cbz_filename(epub) and rich is not None:
+            page = coerce_page(rich.get("page"))
+            canonical_pct = percentage_from_cbz_page(self.ebook_parser, epub, page)
+            if canonical_pct is not None and (bl_pct is None or float(bl_pct) > 0.0):
+                if bl_pct is not None and abs(float(bl_pct) - canonical_pct) > 0.005:
+                    logger.warning(
+                        "Grimmory CBZ progress mismatch for '%s': reported=%.2f%%, page=%s -> canonical=%.2f%%; using page-derived progress",
+                        epub, float(bl_pct) * 100.0, page, canonical_pct * 100.0,
+                    )
+                bl_pct = canonical_pct
+                rich["page"] = page
         if bl_pct is None:
             logger.debug("Grimmory percentage is None - returning no service state")
             return None
@@ -153,7 +166,15 @@ class BookloreSyncClient(SyncClient):
         if is_cbz_filename(epub):
             page = page_from_marker_text(getattr(request, "txt", None))
             if page is None and getattr(locator, "cfi", None) == FIXED_PAGE_LOCATOR_CFI:
-                page = getattr(locator, "fragment", None)
+                page = coerce_page(getattr(locator, "fragment", None))
+            canonical_pct = percentage_from_cbz_page(self.ebook_parser, epub, page)
+            if canonical_pct is not None and pct is not None and float(pct) > 0.0:
+                if abs(float(pct) - canonical_pct) > 0.005:
+                    logger.warning(
+                        "Correcting outgoing Grimmory CBZ progress for '%s': requested=%.2f%%, page=%s -> canonical=%.2f%%",
+                        epub, float(pct) * 100.0, page, canonical_pct * 100.0,
+                    )
+                pct = canonical_pct
             locator = LocatorResult(
                 percentage=pct,
                 fragment=str(page) if page is not None else None,

@@ -59,19 +59,14 @@ def page_from_marker_text(text: Optional[str]) -> Optional[int]:
     return coerce_page(raw_page)
 
 
-def estimate_cbz_page(ebook_parser, filename: Optional[str], percentage: float) -> Optional[int]:
-    """Estimate a CBZ page from percentage by counting image entries.
-
-    This is used when Grimmory is the leader. Grimmory exposes a CBX percentage
-    to BookBridge, while KoSync requires the concrete page number for KOReader's
-    ``GotoPage`` path. Counting images gives us the same page domain without
-    attempting to parse the CBZ as an EPUB.
-    """
+def count_cbz_pages(ebook_parser, filename: Optional[str]) -> Optional[int]:
+    """Return the number of image pages in a CBZ without EPUB parsing."""
     if not is_cbz_filename(filename) or ebook_parser is None:
         return None
 
     try:
-        path = ebook_parser.resolve_book_path(filename)
+        candidate = Path(str(filename))
+        path = candidate if candidate.exists() else ebook_parser.resolve_book_path(filename)
         if path is None:
             return None
         with zipfile.ZipFile(path) as archive:
@@ -84,7 +79,23 @@ def estimate_cbz_page(ebook_parser, filename: Optional[str], percentage: float) 
     except (OSError, zipfile.BadZipFile, RuntimeError, ValueError):
         return None
 
-    if page_count <= 0:
+    return page_count if page_count > 0 else None
+
+
+def percentage_from_cbz_page(ebook_parser, filename: Optional[str], page) -> Optional[float]:
+    """Return canonical 0..1 progress for a 1-based CBZ page."""
+    page = coerce_page(page)
+    page_count = count_cbz_pages(ebook_parser, filename)
+    if page is None or not page_count:
+        return None
+    page = max(1, min(page_count, page))
+    return page / float(page_count)
+
+
+def estimate_cbz_page(ebook_parser, filename: Optional[str], percentage: float) -> Optional[int]:
+    """Estimate a 1-based CBZ page from a 0..1 percentage."""
+    page_count = count_cbz_pages(ebook_parser, filename)
+    if not page_count:
         return None
 
     try:
@@ -92,7 +103,5 @@ def estimate_cbz_page(ebook_parser, filename: Optional[str], percentage: float) 
     except (TypeError, ValueError):
         return None
 
-    # KOReader reports page-based progress close to page / total-pages. Keep the
-    # result in the 1..N range for a non-zero reading position.
     page = int(round(pct * page_count))
     return max(1, min(page_count, page))

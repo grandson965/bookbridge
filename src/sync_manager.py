@@ -1331,7 +1331,7 @@ class SyncManager:
             try:
                 parser_path = parser.resolve_book_path(ebook_filename)
                 if parser_path is not None:
-                    logger.info(f"🔍 Found EPUB via parser resolver: {parser_path}")
+                    logger.info(f"🔍 Found ebook via path resolver: {parser_path}")
                     return parser_path
             except (FileNotFoundError, OSError):
                 pass
@@ -2315,8 +2315,14 @@ class SyncManager:
                 logger.info(
                     f"Ebook-only background prep: skipping Storyteller/SMIL/Whisper transcript generation for '{sanitize_log_data(abs_title)}'"
                 )
-                # Warm parser caches for subsequent locator-based sync cycles.
-                self.ebook_parser.extract_text_and_map(epub_path)
+                # Reflowable ebooks benefit from a warm text/locator cache. CBZ is
+                # fixed-page and must never be handed to ebooklib's EPUB parser.
+                if is_cbz_filename(epub_path.name):
+                    logger.info(
+                        f"Ebook-only background prep: skipping EPUB parser warmup for CBZ '{sanitize_log_data(epub_path.name)}'"
+                    )
+                else:
+                    self.ebook_parser.extract_text_and_map(epub_path)
                 update_progress(1.0, 3)
                 book.status = 'active'
                 persist_book()
@@ -3972,7 +3978,8 @@ class SyncManager:
                 # (see _hydrate_cfi_locator and #364). Resolve one once per cycle and
                 # hand it to whichever of them are in play.
                 hydrated_locator = None
-                if not locator.cfi and any(name in config for name in _CFI_DEPENDENT_CLIENTS):
+                if (not is_cbz_filename(epub) and not locator.cfi
+                        and any(name in config for name in _CFI_DEPENDENT_CLIENTS)):
                     hydrated_locator = self._hydrate_cfi_locator(
                         locator, epub, abs_id, title_snip, leader, leader_pct, leader_formatter
                     )

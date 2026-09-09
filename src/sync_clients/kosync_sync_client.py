@@ -16,6 +16,7 @@ from src.utils.fixed_page_progress import (
     is_cbz_filename,
     marker_text,
     page_from_marker_text,
+    percentage_from_cbz_page,
 )
 from src.utils.config_loader import env_truthy
 from src.utils.kosync_canonical import (
@@ -74,6 +75,17 @@ class KoSyncSyncClient(SyncClient):
                 ko_pct, ko_xpath = self.kosync_client.get_progress(ko_id)
         else:
             ko_pct, ko_xpath = self.kosync_client.get_progress(ko_id)
+        epub = getattr(book, "original_ebook_filename", None) or getattr(book, "ebook_filename", None)
+        if is_cbz_filename(epub):
+            page = coerce_page(ko_xpath)
+            canonical_pct = percentage_from_cbz_page(self.ebook_parser, epub, page)
+            if canonical_pct is not None and ko_pct is not None and float(ko_pct) > 0.0:
+                if abs(float(ko_pct) - canonical_pct) > 0.005:
+                    logger.warning(
+                        "KoSync CBZ progress mismatch for '%s': reported=%.2f%%, page=%s -> canonical=%.2f%%; using page-derived progress",
+                        epub, float(ko_pct) * 100.0, page, canonical_pct * 100.0,
+                    )
+                ko_pct = canonical_pct
         book_label = f"'{title_snip}' " if title_snip else ""
         if ko_pct is None:
             if ko_xpath is None:
@@ -340,6 +352,14 @@ class KoSyncSyncClient(SyncClient):
             if pct is not None and pct <= 0:
                 page_progress = "1"
             elif page is not None:
+                canonical_pct = percentage_from_cbz_page(self.ebook_parser, epub, page)
+                if canonical_pct is not None:
+                    if pct is not None and abs(float(pct) - canonical_pct) > 0.005:
+                        logger.warning(
+                            "Correcting outgoing KoSync CBZ progress for '%s': requested=%.2f%%, page=%s -> canonical=%.2f%%",
+                            epub, float(pct) * 100.0, page, canonical_pct * 100.0,
+                        )
+                    pct = canonical_pct
                 page_progress = str(page)
             else:
                 logger.warning(
