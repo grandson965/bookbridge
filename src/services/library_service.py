@@ -13,6 +13,12 @@ from src.db.database_service import DatabaseService
 from src.api.api_clients import ABSClient
 from src.api.cwa_client import CWAClient
 from src.utils.cache_paths import safe_cache_path
+from src.utils.ebook_sources import (
+    is_grimmory_source,
+    is_storyteller_filename,
+    local_ebook_filename,
+    normalize_ebook_source,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -58,18 +64,18 @@ class LibraryService:
         if book and book.ebook_source and book.ebook_source_id:
             # Skip tri-linked mappings where ebook_filename names the Storyteller artifact
             # while ebook_source_id points at the source library book.
-            if book.ebook_filename and book.ebook_filename.startswith("storyteller_"):
+            if is_storyteller_filename(book.ebook_filename):
                 logger.debug("   Priority 0 (Explicit mapping): Skipped — ebook_filename is a Storyteller artifact")
             else:
                 # Map source to client
                 client = None
                 source_name = book.ebook_source
-                source_key = str(source_name or "").strip().lower()
-                if source_key == "bookorbit":
+                normalized_source = normalize_ebook_source(source_name)
+                if normalized_source == "BookOrbit":
                     client = self.bookorbit_client
-                elif source_key in ("booklore", "grimmory"):
+                elif is_grimmory_source(source_name):
                     client = self.booklore
-                elif source_key == "kavita":
+                elif normalized_source == "Kavita":
                     client = self.kavita_client
                 # Any other source is not supported here
                 
@@ -78,7 +84,7 @@ class LibraryService:
                     # the original local cache name when a source-side rename is
                     # reconciled so filename drift alone does not redownload bytes
                     # or change the KoSync document identity.
-                    local_filename = book.original_ebook_filename or book.ebook_filename
+                    local_filename = local_ebook_filename(book)
                     if local_filename:
                         cache_path = safe_cache_path(self.epub_cache_dir, local_filename)
                         if cache_path:
@@ -225,9 +231,9 @@ class LibraryService:
             
             all_books = self.booklore.get_all_books()
             logger.info(f"   📚 Grimmory cache is active with {len(all_books)} books.")
-            
-            # FUTURE: If we want to ensure DB sync for fields that changed without ID change,
-            # we could do it here, but efficiently. For now, trust the client's cache logic.
+            reconcile = getattr(self.booklore, "reconcile_mapping_filename_drift", None)
+            if callable(reconcile):
+                reconcile()
             
         except Exception as e:
             logger.error(f"   ❌ Library sync failed: {e}", exc_info=True)

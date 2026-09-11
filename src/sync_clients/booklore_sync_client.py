@@ -6,6 +6,7 @@ from src.api.booklore_client import BookloreClient
 from src.db.models import Book, State
 from src.utils.ebook_utils import EbookParser
 from src.utils.progress_metadata import parse_service_timestamp
+from src.utils.ebook_sources import is_grimmory_source, normalize_ebook_source
 from src.sync_clients.sync_client_interface import SyncClient, SyncResult, UpdateProgressRequest, ServiceState
 
 logger = logging.getLogger(__name__)
@@ -34,7 +35,7 @@ class BookloreSyncClient(SyncClient):
     def _mapped_book_id(book: Book) -> Optional[str]:
         source = getattr(book, "ebook_source", None)
         source_id = getattr(book, "ebook_source_id", None)
-        if not isinstance(source, str) or source.strip().lower() not in ("booklore", "grimmory"):
+        if not isinstance(source, str) or not is_grimmory_source(source):
             return None
         if not isinstance(source_id, (str, int)) or not str(source_id).strip():
             return None
@@ -44,33 +45,45 @@ class BookloreSyncClient(SyncClient):
         """Resolve and safely backfill an exact legacy filename match."""
         if not epub:
             return None
+        source = getattr(book, "ebook_source", None)
+        if source is not None and (
+            not isinstance(source, str)
+            or (source.strip() and not is_grimmory_source(source))
+        ):
+            return None
         exact_resolver = getattr(self.booklore_client, "find_book_by_filename_exact", None)
         target = exact_resolver(epub) if callable(exact_resolver) else None
         if not isinstance(target, dict) or target.get("id") in (None, ""):
             return None
 
         book_id = str(target["id"])
-        source = getattr(book, "ebook_source", None)
-        if source is None or (
-            isinstance(source, str)
-            and (not source.strip() or source.strip().lower() in ("booklore", "grimmory"))
-        ):
-            book.ebook_source = source or "BookLore"
-            book.ebook_source_id = book_id
-            db = getattr(self.booklore_client, "db", None)
-            update = getattr(db, "update_book_if_exists", None)
-            if callable(update):
-                try:
-                    update(book)
-                    logger.info(
-                        "Grimmory mapping source id backfilled for %s: %s (exact filename: %s)",
-                        getattr(book, "abs_id", "?"), book_id, epub,
-                    )
-                except Exception:
+        original_source = source
+        book.ebook_source = normalize_ebook_source(source or "Booklore")
+        book.ebook_source_id = book_id
+        db = getattr(self.booklore_client, "db", None)
+        claim = getattr(db, "backfill_ebook_source_id_if_unclaimed", None)
+        if callable(claim):
+            try:
+                if not claim(book.abs_id, book_id, book.ebook_source):
                     logger.warning(
-                        "Grimmory mapping source-id backfill failed for %s",
-                        getattr(book, "abs_id", "?"), exc_info=True,
+                        "Grimmory mapping source-id backfill refused for %s: id %s is already claimed",
+                        getattr(book, "abs_id", "?"), book_id,
                     )
+                    book.ebook_source = original_source
+                    book.ebook_source_id = None
+                    return None
+                logger.info(
+                    "Grimmory mapping source id backfilled for %s: %s (exact filename: %s)",
+                    getattr(book, "abs_id", "?"), book_id, epub,
+                )
+            except Exception:
+                logger.warning(
+                    "Grimmory mapping source-id backfill failed for %s",
+                    getattr(book, "abs_id", "?"), exc_info=True,
+                )
+                book.ebook_source = original_source
+                book.ebook_source_id = None
+                return None
         return book_id
 
     def supports_book(self, book: Book) -> bool:
@@ -80,9 +93,9 @@ class BookloreSyncClient(SyncClient):
         # the tag variant it was saved under ('BookLore'/'Booklore'/'Grimmory');
         # never hijack a book explicitly owned by another ebook source (e.g.
         # BookOrbit), even if Grimmory hosts the same file.
-        src = (getattr(book, "ebook_source", None) or "").strip().lower()
+        src = str(getattr(book, "ebook_source", None) or "").strip()
         if src:
-            return src in ("booklore", "grimmory") and bool(self._mapped_book_id(book) or epub)
+            return is_grimmory_source(src) and bool(self._mapped_book_id(book) or epub)
 
         if not epub:
             return False

@@ -40,6 +40,7 @@ from src.utils.user_config import SERVICE_ENABLE_KEYS
 from src.utils.config_loader import ConfigLoader, KNOWN_SETTING_KEYS, env_truthy
 from src.utils.cache_paths import safe_cache_path, safe_library_path, is_plain_basename
 from src.utils.ebook_utils import LRUCache
+from src.utils.ebook_sources import is_grimmory_source, local_ebook_filename, normalize_ebook_source
 from src.utils.logging_utils import memory_log_handler, LOG_PATH
 from src.utils.logging_utils import sanitize_log_data
 from src.utils.logging_utils import get_persistent_condition_logger
@@ -1901,9 +1902,12 @@ def get_kosync_id_for_ebook(ebook_filename, booklore_id=None, original_filename=
 
     # Check the EPUB cache explicitly when LibraryService acquired a file outside /books.
     epub_cache = container.epub_cache_dir()
-    cached_path = safe_cache_path(epub_cache, ebook_filename)
-    if cached_path and cached_path.exists():
-         return container.ebook_parser().get_kosync_id(cached_path)
+    for cache_filename in dict.fromkeys((ebook_filename, original_filename)):
+        if not cache_filename:
+            continue
+        cached_path = safe_cache_path(epub_cache, cache_filename)
+        if cached_path and cached_path.exists():
+            return container.ebook_parser().get_kosync_id(cached_path)
 
     # On-demand fetching
     # 0. BookOrbit On-Demand — the library hosts the file via API even when the
@@ -2390,6 +2394,14 @@ def _preserve_or_reset_mapping_status(
 
     if ebook_source is not None and existing_source and existing_source.lower() != next_source.lower():
         changed.append("ebook_source")
+
+    if same_stable_ebook and not changed:
+        logger.info(
+            "♻️ '%s' External ebook metadata changed with stable source identity — "
+            "preserving mapping status",
+            sanitize_log_data(abs_id),
+        )
+        return
 
     reusable = False
     if not changed and abs_id:
@@ -3358,20 +3370,7 @@ def _build_bridge_key(audio_source, audio_source_id):
 
 
 def _normalize_text_source_type(raw_source):
-    source_text = str(raw_source or "").strip()
-    if not source_text:
-        return ""
-    source_map = {
-        "booklore": "Booklore",
-        "grimmory": "Booklore",
-        "bookorbit": "BookOrbit",
-        "kavita": "Kavita",
-        "bookfusion": "BookFusion",
-        "abs": "ABS",
-        "cwa": "CWA",
-        "local file": "Local File",
-    }
-    return source_map.get(source_text.lower(), source_text)
+    return normalize_ebook_source(raw_source)
 
 
 def _safe_local_source_path(raw_path) -> str:
@@ -3487,7 +3486,7 @@ def _create_or_update_library_audio_mapping(
         return None, "Please select a text source (Storyteller or Standard Ebook)", 400
 
     booklore_ebook_id = None
-    if ebook_source == "BookLore":
+    if is_grimmory_source(ebook_source):
         booklore_ebook_id = ebook_source_id
     elif uc().booklore_client.is_configured():
         bl_book = uc().booklore_client.find_book_by_filename(original_ebook_filename or resolved_ebook_filename)
@@ -5000,7 +4999,7 @@ def _browser_cover_url(
     ebook_src = (ebook_source or "").strip()
     ebook_id = (ebook_source_id or "").strip()
     if ebook_id:
-        if ebook_src == "BookLore":
+        if is_grimmory_source(ebook_src):
             return f"/api/booklore/audiobook-cover/{ebook_id}"
         if ebook_src == "BookOrbit":
             return f"/api/bookorbit/audiobook-cover/{ebook_id}"
@@ -8646,6 +8645,9 @@ def cleanup_mapping_resources(book, defer_audio_cache: bool = False):
             remaining_filename = getattr(remaining_book, 'ebook_filename', None)
             if remaining_filename:
                 remaining_cache_filenames.add(remaining_filename)
+            remaining_local_filename = local_ebook_filename(remaining_book)
+            if remaining_local_filename:
+                remaining_cache_filenames.add(remaining_local_filename)
 
             remaining_uuid = getattr(remaining_book, 'storyteller_uuid', None)
             if not remaining_uuid and remaining_filename:
@@ -8680,11 +8682,12 @@ def cleanup_mapping_resources(book, defer_audio_cache: bool = False):
         except Exception as e:
             logger.warning(f"⚠️ Failed to delete transcript directory: {e}", exc_info=True)
 
+    cached_ebook_filename = local_ebook_filename(book)
     preserve_cached_ebook = (
         remaining_books is None
-        or book.ebook_filename in remaining_cache_filenames
+        or cached_ebook_filename in remaining_cache_filenames
     )
-    if book.ebook_filename and not preserve_cached_ebook:
+    if cached_ebook_filename and not preserve_cached_ebook:
         cache_dirs = []
         try:
             cache_dirs.append(container.epub_cache_dir())
@@ -8703,13 +8706,13 @@ def cleanup_mapping_resources(book, defer_audio_cache: bool = False):
                 continue
             seen_dirs.add(cache_dir_key)
 
-            cached_path = safe_cache_path(cache_dir_path, book.ebook_filename)
+            cached_path = safe_cache_path(cache_dir_path, cached_ebook_filename)
             if cached_path and cached_path.exists():
                 try:
                     cached_path.unlink()
-                    logger.info(f"🗑️ Deleted cached ebook file: {book.ebook_filename}")
+                    logger.info(f"🗑️ Deleted cached ebook file: {cached_ebook_filename}")
                 except Exception as e:
-                    logger.warning(f"⚠️ Failed to delete cached ebook {book.ebook_filename}: {e}", exc_info=True)
+                    logger.warning(f"⚠️ Failed to delete cached ebook {cached_ebook_filename}: {e}", exc_info=True)
 
     # KoSync progress must not outlive the mapping. The document hash comes from
     # the EPUB's content, so re-matching the same file re-links the identical hash
@@ -11139,6 +11142,10 @@ def api_booklore_refresh():
 
     if not refreshed:
         return jsonify({"success": False, "error": "Grimmory refresh failed"}), 500
+
+    reconcile = getattr(client, "reconcile_mapping_filename_drift", None)
+    if callable(reconcile):
+        reconcile()
 
     return jsonify({"success": True, "message": "Grimmory cache refreshed successfully"})
 
