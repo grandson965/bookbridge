@@ -2328,6 +2328,7 @@ def _preserve_or_reset_mapping_status(
     ebook_filename=None,
     audio_source_id=None,
     storyteller_uuid=None,
+    ebook_source=None,
     ebook_source_id=None,
 ) -> None:
     """Queue a mapping for processing, unless its existing alignment still applies.
@@ -2354,9 +2355,22 @@ def _preserve_or_reset_mapping_status(
     # readalong uuid and the ebook source id are as much a part of the pairing as
     # the filename — swapping a book to a different Storyteller readalong changes
     # the audio the map was built against.
+    existing_source = _normalize_text_source_type(getattr(target_book, "ebook_source", None))
+    next_source = _normalize_text_source_type(ebook_source) if ebook_source is not None else existing_source
+    existing_source_id = str(getattr(target_book, "ebook_source_id", None) or "").strip()
+    next_source_id = str(ebook_source_id or "").strip()
+    same_stable_ebook = bool(
+        existing_source
+        and next_source
+        and existing_source.lower() == next_source.lower()
+        and existing_source_id
+        and next_source_id
+        and existing_source_id == next_source_id
+    )
+
     candidates = (
         ("kosync_doc_id", kosync_doc_id),
-        ("ebook_filename", ebook_filename),
+        ("ebook_filename", None if same_stable_ebook else ebook_filename),
         ("audio_source_id", audio_source_id),
         ("storyteller_uuid", storyteller_uuid),
         ("ebook_source_id", ebook_source_id),
@@ -2373,6 +2387,9 @@ def _preserve_or_reset_mapping_status(
         # would re-transcribe books this guard exists to spare.
         if existing and str(existing) != str(new_value):
             changed.append(attr)
+
+    if ebook_source is not None and existing_source and existing_source.lower() != next_source.lower():
+        changed.append("ebook_source")
 
     reusable = False
     if not changed and abs_id:
@@ -2612,6 +2629,7 @@ def _upsert_storyteller_mapping(
         kosync_doc_id=kosync_doc_id,
         ebook_filename=resolved_ebook_filename,
         storyteller_uuid=selected_storyteller_uuid,
+        ebook_source=selected_ebook_source,
         ebook_source_id=selected_ebook_source_id,
     )
     target_book.abs_title = abs_title or target_book.abs_title or Path(resolved_ebook_filename).stem
@@ -3516,6 +3534,7 @@ def _create_or_update_library_audio_mapping(
         ebook_filename=resolved_ebook_filename,
         audio_source_id=str(audio_source_id),
         storyteller_uuid=storyteller_uuid,
+        ebook_source=ebook_source,
         ebook_source_id=ebook_source_id,
     )
     target_book.audio_source = audio_source
@@ -6538,6 +6557,7 @@ def match():
                 ebook_filename=ebook_filename,
                 audio_source_id=abs_id,
                 storyteller_uuid=effective_storyteller_uuid,
+                ebook_source=ebook_source,
                 ebook_source_id=ebook_source_id,
             )
             resolved_status = current_book_entry.status or "pending"
