@@ -23,6 +23,20 @@ def normalize_ebook_source(value) -> str:
     return _SOURCE_NAMES.get(source.lower(), source)
 
 
+def source_name_variants(value) -> tuple[str, ...]:
+    """Return lowercased stored spellings for one canonical ebook source."""
+    canonical = normalize_ebook_source(value)
+    if not canonical:
+        return ()
+    variants = {
+        alias
+        for alias, canonical_name in _SOURCE_NAMES.items()
+        if canonical_name == canonical
+    }
+    variants.add(canonical.lower())
+    return tuple(sorted(variants))
+
+
 def is_grimmory_source(value) -> bool:
     """Whether *value* is a BookLore/Grimmory source-name variant."""
     return normalize_ebook_source(value) == "Booklore"

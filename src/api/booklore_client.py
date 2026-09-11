@@ -1383,6 +1383,7 @@ class BookloreClient:
                     mapping.abs_id,
                     expected_ebook_source_id=source_id,
                     expected_grimmory_source=True,
+                    notify_catalog_change=True,
                     **fields,
                 )
             except Exception:
@@ -1394,9 +1395,6 @@ class BookloreClient:
             if saved:
                 updated_count += 1
         return updated_count
-
-    # Kept private alias for callers/tests from the initial implementation.
-    _reconcile_mapping_filename_drift = reconcile_mapping_filename_drift
 
     def _fetch_and_cache_detail(self, book_id, force_refresh=False):
         """Fetch detail for a single book on demand and add it to cache."""

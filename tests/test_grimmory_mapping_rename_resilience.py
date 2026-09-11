@@ -229,12 +229,13 @@ def test_library_reconcile_refreshes_only_external_filename(old_filename, new_fi
     db.update_book_fields.return_value = True
     client = bare_client(db, {4: {"id": 4, "fileName": new_filename}})
 
-    assert client._reconcile_mapping_filename_drift() == 1
+    assert client.reconcile_mapping_filename_drift() == 1
 
     db.update_book_fields.assert_called_once_with(
         "book-1",
         expected_ebook_source_id="4",
         expected_grimmory_source=True,
+        notify_catalog_change=True,
         ebook_filename=new_filename,
     )
     assert book.ebook_filename == old_filename
@@ -250,7 +251,7 @@ def test_library_reconcile_does_not_relink_missing_known_id_by_filename():
     db.get_all_books.return_value = [book]
     client = bare_client(db, {5: {"id": 5, "fileName": "same-name.epub"}})
 
-    assert client._reconcile_mapping_filename_drift() == 0
+    assert client.reconcile_mapping_filename_drift() == 0
 
     assert book.ebook_source_id == "404"
     assert book.ebook_filename == "same-name.epub"
@@ -270,7 +271,7 @@ def test_library_reconcile_backfills_only_unambiguous_exact_legacy_match():
         6: {"id": 6, "fileName": "duplicate.epub"},
     })
 
-    assert client._reconcile_mapping_filename_drift() == 1
+    assert client.reconcile_mapping_filename_drift() == 1
 
     assert exact.ebook_source_id == "4"
     assert ambiguous.ebook_source_id is None
@@ -371,6 +372,20 @@ def test_database_backfill_allows_only_one_mapping_to_claim_source_id(tmp_path):
 
         assert db.get_book("book-1").ebook_source_id == "4"
         assert db.get_book("book-2").ebook_source_id is None
+    finally:
+        db.db_manager.close()
+
+
+@pytest.mark.parametrize("stored_source", ["BookLore", "Booklore", "Grimmory", "grimmory"])
+def test_database_source_lookup_normalizes_grimmory_aliases(tmp_path, stored_source):
+    db = DatabaseService(str(tmp_path / "source-lookup.db"))
+    try:
+        db.save_book(mapped_book(source=stored_source, source_id="4"))
+
+        found = db.get_book_by_ebook_source("BookLore", "4")
+
+        assert found is not None
+        assert found.abs_id == "book-1"
     finally:
         db.db_manager.close()
 

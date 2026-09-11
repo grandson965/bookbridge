@@ -47,6 +47,7 @@ from .models import (
 )
 from src.services.map_quality import ALIGNMENT_QUALITY_REALIGN_THRESHOLD, quality_detail_json, score_map
 from src.utils import secret_store
+from src.utils.ebook_sources import source_name_variants
 from src.utils.time_utils import utcnow
 
 logger = logging.getLogger(__name__)
@@ -585,6 +586,7 @@ class DatabaseService:
         *,
         expected_ebook_source_id: Optional[str] = None,
         expected_grimmory_source: bool = False,
+        notify_catalog_change: bool = False,
         **fields,
     ) -> bool:
         """Update named columns on one book row, leaving `abs_id` alone.
@@ -616,7 +618,7 @@ class DatabaseService:
                 {getattr(Book, key): value for key, value in allowed.items()},
                 synchronize_session=False,
             )
-        if updated:
+        if updated and notify_catalog_change:
             self._notify_catalog_change()
         return bool(updated)
 
@@ -2268,11 +2270,13 @@ class DatabaseService:
 
     def get_book_by_ebook_source(self, ebook_source: str, ebook_source_id: str) -> Optional['Book']:
         """Find a book by its ebook source + source id (e.g. BookLore/<grimmory_id>)."""
-        if not ebook_source or not ebook_source_id:
+        variants = source_name_variants(ebook_source)
+        if not variants or not ebook_source_id:
             return None
+        from sqlalchemy import func
         with self.get_session() as session:
             book = session.query(Book).filter(
-                Book.ebook_source == ebook_source,
+                func.lower(func.trim(Book.ebook_source)).in_(variants),
                 Book.ebook_source_id == str(ebook_source_id),
             ).first()
             if book:

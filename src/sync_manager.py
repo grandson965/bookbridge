@@ -1384,21 +1384,30 @@ class SyncManager:
         logger.info(f"✅ Downloaded EPUB to cache: '{cached_path}'")
         return cached_path
 
-    def _resolve_local_epub_uncached(self, ebook_filename):
+    def _resolve_local_epub_uncached(self, ebook_filename, _seen=None):
         """
         Get local path to EPUB file, downloading from Grimmory if necessary.
         """
         # A reconciled library mapping may expose a new remote filename while the
         # existing bytes intentionally remain cached under the original name.
-        # Resolve that stable local identity first; the recursive call terminates
-        # because original == requested on the second pass.
+        # A second mapping can itself own that original filename, so retain a
+        # visited set rather than assuming the lookup returns the same row.
+        seen = set() if _seen is None else _seen
+        filename_key = str(ebook_filename)
+        if filename_key in seen:
+            logger.warning(
+                "Detected cyclic local EPUB filename mapping at '%s'; falling back",
+                sanitize_log_data(filename_key),
+            )
+            return None
+        seen.add(filename_key)
         try:
             mapped_book = self.database_service.get_book_by_ebook_filename(ebook_filename)
         except Exception:
             mapped_book = None
         stable_local_filename = local_ebook_filename(mapped_book) if mapped_book else None
         if stable_local_filename and stable_local_filename != ebook_filename:
-            stable_path = self._resolve_local_epub_uncached(stable_local_filename)
+            stable_path = self._resolve_local_epub_uncached(stable_local_filename, seen)
             if stable_path is not None:
                 return stable_path
 
