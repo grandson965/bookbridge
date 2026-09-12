@@ -44,6 +44,20 @@ def cbz_path(tmp_path):
     return path
 
 
+@pytest.fixture
+def webp_cbz_path(tmp_path):
+    """Match the nested WebP-plus-ComicInfo layout KOReader reads as 58 pages."""
+    path = tmp_path / "Suske en Wiske - 002 - De Vliegende Aap.cbz"
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr("ComicInfo.xml", b"<ComicInfo />")
+        for page in range(1, 59):
+            archive.writestr(
+                f"Comic Folder\\{page:03}.webp",
+                b"webp page",
+            )
+    return path
+
+
 class FixedPageParser:
     def __init__(self, path: Path):
         self.path = path
@@ -90,6 +104,49 @@ def test_cbz_page_percentage_roundtrip(cbz_path):
     pct = percentage_from_cbz_page(parser, str(cbz_path), TEST_PAGE)
     assert pct == pytest.approx(TEST_PAGE / PAGE_COUNT)
     assert estimate_cbz_page(parser, str(cbz_path), pct) == TEST_PAGE
+
+
+def test_koreader_webp_cbz_counts_nested_pages_and_canonicalizes_progress(webp_cbz_path):
+    parser = FixedPageParser(webp_cbz_path)
+
+    assert count_cbz_pages(parser, str(webp_cbz_path)) == 58
+    assert percentage_from_cbz_page(parser, str(webp_cbz_path), 58) == 1.0
+    assert percentage_from_cbz_page(parser, str(webp_cbz_path), 6) == pytest.approx(6 / 58)
+
+
+def test_kosync_and_grimmory_read_webp_cbz_pages_as_service_state(webp_cbz_path):
+    parser = FixedPageParser(webp_cbz_path)
+    kosync = KoSyncSyncClient(
+        SimpleNamespace(
+            get_progress_with_metadata=lambda _doc_id: (0.75, "58", {}),
+            is_configured=lambda: True,
+        ),
+        parser,
+    )
+    grimmory = BookloreSyncClient(
+        SimpleNamespace(
+            get_progress_rich=lambda _filename: {
+                "pct": 0.0,
+                "cfi": None,
+                "page": 6,
+                "last_read_time": None,
+                "status": "READING",
+            },
+            is_configured=lambda: True,
+        ),
+        parser,
+    )
+
+    kosync_state = kosync.get_service_state(cbz_book(webp_cbz_path), None)
+    grimmory_state = grimmory.get_service_state(cbz_book(webp_cbz_path), None)
+
+    assert kosync_state is not None
+    assert kosync_state.current["page"] == 58
+    assert kosync_state.current["pct"] == 1.0
+    assert kosync_state.current["xpath"] == "58"
+    assert grimmory_state is not None
+    assert grimmory_state.current["page"] == 6
+    assert grimmory_state.current["pct"] == pytest.approx(6 / 58)
 
 
 def test_kosync_cbz_read_uses_concrete_page_as_authoritative(cbz_path):
@@ -934,18 +991,17 @@ def test_grimmory_concurrent_remote_page_is_preserved_in_cache():
     assert client._book_id_cache[42]["cbxProgress"]["page"] != TEST_PAGE
 
 
-def test_page_count_matches_mupdf_extension_filter(tmp_path):
+def test_page_count_matches_koreader_mupdf_extension_filter(tmp_path):
     accepted = [
         ".bmp", ".gif", ".hdp", ".j2k", ".jb2", ".jbig2", ".jp2",
         ".jpeg", ".jpg", ".jpx", ".jxr", ".pam", ".pbm", ".pgm",
-        ".pkm", ".png", ".pnm", ".ppm", ".tif", ".tiff", ".wdp",
+        ".pkm", ".png", ".pnm", ".ppm", ".tif", ".tiff", ".wdp", ".webp",
     ]
     path = tmp_path / "extensions.cbz"
     with zipfile.ZipFile(path, "w") as archive:
         for index, suffix in enumerate(accepted):
             archive.writestr(f"nested/{index}{suffix.upper()}", b"page")
-        archive.writestr("cover.webp", b"not a MuPDF CBZ page")
-        archive.writestr("cover.avif", b"not a MuPDF CBZ page")
+        archive.writestr("cover.avif", b"not a KOReader MuPDF CBZ page")
         archive.writestr("__MACOSX/._001.jpg", b"still counted")
 
     assert count_cbz_pages(FixedPageParser(path), str(path)) == len(accepted) + 1

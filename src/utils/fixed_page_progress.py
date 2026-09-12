@@ -14,10 +14,14 @@ from pathlib import Path
 from typing import Optional
 
 
-_CBZ_IMAGE_EXTENSIONS = {
+# KOReader's bundled MuPDF keeps the upstream CBZ extensions and adds WebP via
+# koreader-base/thirdparty/mupdf/webp-upstream-697749.patch. This metadata-only
+# policy models the entries KOReader treats as fixed pages; AVIF is not supported
+# by that patch and remains excluded.
+_KOREADER_CBZ_PAGE_EXTENSIONS = {
     ".bmp", ".gif", ".hdp", ".j2k", ".jb2", ".jbig2", ".jp2", ".jpeg",
     ".jpg", ".jpx", ".jxr", ".pam", ".pbm", ".pgm", ".pkm", ".png",
-    ".pnm", ".ppm", ".tif", ".tiff", ".wdp",
+    ".pnm", ".ppm", ".tif", ".tiff", ".wdp", ".webp",
 }
 
 
@@ -63,11 +67,12 @@ def page_from_persisted_state(state) -> Optional[int]:
 
 
 def count_cbz_pages(ebook_parser, filename: Optional[str]) -> Optional[int]:
-    """Return MuPDF's page count for a CBZ without EPUB parsing.
+    """Return KOReader's CBZ page count without EPUB parsing.
 
-    This deliberately mirrors MuPDF's ``source/cbz/mucbz.c`` extension-only
-    filter. Do not exclude cover, thumbnail, dot/AppleDouble, or nested files:
-    MuPDF counts those entries too. WebP and AVIF are intentionally absent.
+    Count the extension-only entries accepted by KOReader's bundled MuPDF.
+    Do not exclude cover, thumbnail, dot/AppleDouble, or nested files: MuPDF
+    counts those entries too. WebP is included by KOReader's MuPDF patch; AVIF
+    is not part of that supported set.
     """
     if not is_cbz_filename(filename) or ebook_parser is None:
         return None
@@ -89,7 +94,7 @@ def count_cbz_pages(ebook_parser, filename: Optional[str]) -> Optional[int]:
                     1
                     for info in archive.infolist()
                     if not info.is_dir()
-                    and Path(info.filename).suffix.lower() in _CBZ_IMAGE_EXTENSIONS
+                    and Path(info.filename).suffix.lower() in _KOREADER_CBZ_PAGE_EXTENSIONS
                 )
             page_count = page_count if page_count > 0 else None
     except (OSError, TypeError, zipfile.BadZipFile, RuntimeError, ValueError):
