@@ -141,3 +141,14 @@ def state_metadata_kwargs(current: dict) -> dict:
         "locator_source": derive_locator_source(current),
         "locator_json": extract_locator_json(current),
     }
+
+
+def get_kosync_authoritative_put_at(state: object) -> Optional[float]:
+    """Read the last accepted real-device KoSync PUT cutoff."""
+    try:
+        locator = json.loads(getattr(state, "locator_json", None) or "{}")
+        if isinstance(locator, dict):
+            return parse_service_timestamp(locator.get("kosync_authoritative_put_at"))
+    except (TypeError, ValueError):
+        pass
+    return None

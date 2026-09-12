@@ -26,6 +26,7 @@ from src.utils.cache_paths import safe_cache_path
 from src.utils.config_loader import env_truthy
 from src.utils.kosync_canonical import load_persisted_pair
 from src.utils.kosync_headers import hash_kosync_key
+from src.utils.progress_metadata import get_kosync_authoritative_put_at, parse_service_timestamp
 from src.utils.time_utils import utcnow
 from src.utils.user_context import set_current_user_id, reset_current_user_id
 from src.utils.user_config import (
@@ -231,6 +232,39 @@ def _recent_external_kosync_put_metadata(document_hash: str | None, percentage=N
         "_bridge_recent_external_put_device": entry.get("device") or "",
         "_bridge_recent_external_put_device_id": entry.get("device_id") or "",
     }
+
+
+def _latest_recent_external_kosync_put_document(documents, user_id=None):
+    """Return the newest sibling row backed by an unexpired real-device PUT."""
+    ttl = _recent_external_put_ttl_seconds()
+    if ttl <= 0:
+        return None
+    now_ts = time.time()
+    latest_doc = None
+    latest_ts = float("-inf")
+    with _kosync_recent_external_puts_lock:
+        for device_doc in documents or []:
+            document_hash = getattr(device_doc, "document_hash", None)
+            if not document_hash:
+                continue
+            entry = _kosync_recent_external_puts.get((document_hash, user_id))
+            if not entry:
+                continue
+            try:
+                entry_ts = float(entry.get("timestamp") or 0.0)
+                row_pct = float(getattr(device_doc, "percentage", 0) or 0)
+                entry_pct = float(entry.get("percentage") or 0)
+            except (TypeError, ValueError):
+                continue
+            if now_ts - entry_ts > ttl:
+                _kosync_recent_external_puts.pop((document_hash, user_id), None)
+                continue
+            if abs(row_pct - entry_pct) > 0.0001:
+                continue
+            if entry_ts > latest_ts:
+                latest_ts = entry_ts
+                latest_doc = device_doc
+    return latest_doc
 
 _last_device_sync_activity: float = 0.0
 _MANIFEST_CACHE_FILENAME = "device_sync_manifest.json"
@@ -1575,31 +1609,25 @@ def _auto_map_ebook_to_audiobook(doc_hash_val, epub_filename, candidate, reason)
 
 
 def _record_user_kosync_state(book, percentage, progress, timestamp, user_id):
-    """Persist a KoSync PUT into the per-user State table.
-
-    The kosync_documents row is keyed only by document hash, so two users reading
-    the same EPUB share that transient row. State is keyed by user and is the
-    durable isolation boundary for subsequent GETs and sync cycles.
-    """
-    if not book or user_id is None:
+    """Persist an accepted real-device KoSync PUT as the current book position."""
+    if not book:
         return
+    authoritative_at = timestamp.timestamp() if timestamp else time.time()
     try:
         _database_service.save_state(State(
             abs_id=book.abs_id,
             client_name="kosync",
             percentage=float(percentage or 0),
-            timestamp=int(timestamp.timestamp()) if timestamp else int(time.time()),
+            timestamp=int(authoritative_at),
             last_updated=int(time.time()),
             xpath=progress or "",
+            locator_json=json.dumps({"kosync_authoritative_put_at": authoritative_at}),
             user_id=user_id,
         ))
     except Exception as exc:
         logger.warning(
             "KOSync: failed to persist user-scoped state for '%s' user_id=%s: %s",
-            getattr(book, "abs_id", None),
-            user_id,
-            exc,
-            exc_info=True,
+            getattr(book, "abs_id", None), user_id, exc, exc_info=True,
         )
 
 
@@ -2952,6 +2980,34 @@ def _respond_from_book_states(doc_id, book):
         d for d in progress_rows
         if d.percentage and float(d.percentage) > 0 and (d.progress or "").strip()
     ]
+
+    recent_doc = _latest_recent_external_kosync_put_document(docs_with_progress, user_id)
+    if recent_doc is not None:
+        poison_pill = _suppress_empty_progress_response(
+            doc_id, float(recent_doc.percentage), recent_doc.progress
+        )
+        if poison_pill is not None:
+            return poison_pill
+        response_data = {
+            "device": "abs-kosync-bridge", "device_id": "abs-kosync-bridge",
+            "document": doc_id, "percentage": float(recent_doc.percentage),
+            "progress": recent_doc.progress or "",
+            "timestamp": int(recent_doc.timestamp.timestamp()) if recent_doc.timestamp else 0,
+        }
+        response_data.update(_recent_external_kosync_put_metadata(
+            recent_doc.document_hash, response_data["percentage"], user_id
+        ))
+        return jsonify(response_data), 200
+
+    authoritative_put_at = get_kosync_authoritative_put_at(kosync_state)
+    if authoritative_put_at is not None:
+        eligible_docs = []
+        for device_doc in docs_with_progress:
+            device_at = parse_service_timestamp(getattr(device_doc, "timestamp", None))
+            if device_at is not None and device_at >= authoritative_put_at:
+                eligible_docs.append(device_doc)
+        docs_with_progress = eligible_docs
+
     if docs_with_progress:
         best_doc = max(docs_with_progress, key=lambda d: float(d.percentage))
         # Furthest-wins: only hand back the device's own position when it is genuinely

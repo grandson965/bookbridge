@@ -22,7 +22,7 @@ from src.utils.kosync_canonical import (
     prewarm_xpath_order_cache,
     resolve_canonical_position,
 )
-from src.utils.progress_metadata import parse_service_timestamp
+from src.utils.progress_metadata import get_kosync_authoritative_put_at, parse_service_timestamp
 from src.sync_clients.sync_client_interface import SyncClient, SyncResult, UpdateProgressRequest, ServiceState
 
 logger = logging.getLogger(__name__)
@@ -139,6 +139,9 @@ class KoSyncSyncClient(SyncClient):
         delta = abs(ko_pct - prev_kosync_pct)
 
         current = {"pct": ko_pct, "xpath": ko_xpath}
+        authoritative_put_at = get_kosync_authoritative_put_at(prev_state)
+        if authoritative_put_at is not None:
+            current["kosync_authoritative_put_at"] = authoritative_put_at
         if self.supports_fixed_page_progress() and is_cbz_book(book):
             current["page"] = coerce_page(ko_xpath)
             current["_previous_page"] = page_from_persisted_state(prev_state)
@@ -423,7 +426,14 @@ class KoSyncSyncClient(SyncClient):
                 return SyncResult(current.get('pct'), True, dict(current), skipped=True)
 
             success = self.kosync_client.update_progress(ko_id, pct, page_progress)
-            return SyncResult(pct, success, {'pct': pct, 'xpath': page_progress})
+            updated_state = {'pct': pct, 'xpath': page_progress}
+            authoritative_put_at = (
+                request.current_state.current.get("kosync_authoritative_put_at")
+                if request.current_state else None
+            )
+            if success and authoritative_put_at is not None:
+                updated_state["kosync_authoritative_put_at"] = authoritative_put_at
+            return SyncResult(pct, success, updated_state)
 
         # Always collapse generated KoSync positions to block-level XPointers.
         # Text-node and inline offsets can resolve poorly in KOReader/CREngine,
@@ -487,11 +497,17 @@ class KoSyncSyncClient(SyncClient):
                     exc_info=True,
                 )
 
+        authoritative_put_at = (
+            request.current_state.current.get("kosync_authoritative_put_at")
+            if request.current_state else None
+        )
         success = self.kosync_client.update_progress(ko_id, pct, safe_xpath)
         updated_state = {
             'pct': pct,
             'xpath': safe_xpath
         }
+        if success and authoritative_put_at is not None:
+            updated_state["kosync_authoritative_put_at"] = authoritative_put_at
         if canonical_index is not None and canonical_file_key:
             # Pre-resolve the current device-vs-new-bridge pair off the GET path.
             # Failure is contained; #386's existing GET fallback remains intact.
