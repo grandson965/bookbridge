@@ -42,18 +42,9 @@ jobs:
               exit 1
             fi
             git checkout --ours src/api/kosync_server.py
-            python - <<'PY'
-from pathlib import Path
-p = Path('src/api/kosync_server.py')
-s = p.read_text()
-needle = 'from src.utils.string_utils import calculate_similarity, clean_book_title\n'
-addition = 'from src.utils.ebook_sources import is_grimmory_source\n'
-if addition not in s:
-    if needle not in s:
-        raise SystemExit('expected import anchor not found')
-    s = s.replace(needle, needle + addition, 1)
-p.write_text(s)
-PY
+            if ! grep -q '^from src.utils.ebook_sources import is_grimmory_source$' src/api/kosync_server.py; then
+              sed -i '/^from src.utils.string_utils import calculate_similarity, clean_book_title$/a from src.utils.ebook_sources import is_grimmory_source' src/api/kosync_server.py
+            fi
             git add src/api/kosync_server.py
             git cherry-pick --continue
           fi
