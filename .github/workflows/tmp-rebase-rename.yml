@@ -52,6 +52,13 @@ jobs:
             if ! grep -q '^from src.utils.ebook_sources import is_grimmory_source$' src/api/kosync_server.py; then
               sed -i '/^from src.utils.string_utils import calculate_similarity, clean_book_title$/a from src.utils.ebook_sources import is_grimmory_source' src/api/kosync_server.py
             fi
+            old='booklore_ebook_id=ebook_source_id if ebook_source == "BookLore" else None,'
+            new='booklore_ebook_id=ebook_source_id if is_grimmory_source(ebook_source) else None,'
+            if ! grep -Fq "$old" src/api/kosync_server.py; then
+              echo "Expected BookLore source-id assignment not found" >&2
+              exit 1
+            fi
+            sed -i "s/$old/$new/" src/api/kosync_server.py
             git add src/api/kosync_server.py
             git cherry-pick --continue
           fi
