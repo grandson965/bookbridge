@@ -25,27 +25,49 @@ jobs:
           git fetch upstream dev
           git fetch origin fix/grimmory-mapping-rename-resilience
 
-      - name: Replay rename commits and print first conflict
+      - name: Replay commits, preserve upstream observation-trail import, diagnose remaining conflicts
         shell: bash
         run: |
-          set -u
+          set -euo pipefail
           git checkout -B tmp-rename-result upstream/dev
-          commits=(
-            cc6f697981e2184bec50dbff029c8bdfa31391bc
-            63548376a550ad2d91bfea009883c54c66a1bf64
-            ddb22a15fbaf120e091552b855e918350c883cdc
-            d2944cb133c6297b2a536d4e6dfe3d31185ff2dc
-          )
-          for c in "${commits[@]}"; do
-            echo "=== cherry-pick $c ==="
-            if ! git cherry-pick "$c"; then
-              echo "=== STATUS ==="
+          git cherry-pick cc6f697981e2184bec50dbff029c8bdfa31391bc
+          git cherry-pick 63548376a550ad2d91bfea009883c54c66a1bf64
+
+          if ! git cherry-pick ddb22a15fbaf120e091552b855e918350c883cdc; then
+            conflicts=$(git diff --name-only --diff-filter=U)
+            echo "ddb conflicts: $conflicts"
+            if [ "$conflicts" != "src/api/kosync_server.py" ]; then
               git status --short
-              echo "=== CONFLICT DIFF ==="
-              git diff --cc -- src/api/kosync_server.py src/sync_manager.py src/web_server.py || true
-              echo "=== CONFLICT MARKERS ==="
-              grep -R -n -E '^(<<<<<<<|=======|>>>>>>>)' src/api/kosync_server.py src/sync_manager.py src/web_server.py || true
+              git diff --cc || true
               exit 1
             fi
-          done
-          git log --oneline -5
+            git checkout --ours src/api/kosync_server.py
+            python - <<'PY'
+from pathlib import Path
+p = Path('src/api/kosync_server.py')
+s = p.read_text()
+needle = 'from src.utils.string_utils import calculate_similarity, clean_book_title\n'
+addition = 'from src.utils.ebook_sources import is_grimmory_source\n'
+if addition not in s:
+    if needle not in s:
+        raise SystemExit('expected import anchor not found')
+    s = s.replace(needle, needle + addition, 1)
+p.write_text(s)
+PY
+            git add src/api/kosync_server.py
+            git cherry-pick --continue
+          fi
+
+          if ! git cherry-pick d2944cb133c6297b2a536d4e6dfe3d31185ff2dc; then
+            echo "=== STATUS ==="
+            git status --short
+            echo "=== CONFLICT DIFF ==="
+            git diff --cc || true
+            echo "=== CONFLICT MARKERS ==="
+            grep -R -n -E '^(<<<<<<<|=======|>>>>>>>)' src tests || true
+            exit 1
+          fi
+
+          echo "=== REPLAY SUCCEEDED ==="
+          git log --oneline -6
+          git diff upstream/dev..HEAD --check
