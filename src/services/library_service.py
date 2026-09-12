@@ -64,18 +64,23 @@ class LibraryService:
                 # Map source to client
                 client = None
                 source_name = book.ebook_source
-                if source_name == "BookOrbit":
+                source_key = str(source_name or "").strip().lower()
+                if source_key == "bookorbit":
                     client = self.bookorbit_client
-                elif source_name == "BookLore":
+                elif source_key in ("booklore", "grimmory"):
                     client = self.booklore
-                elif source_name == "Kavita":
+                elif source_key == "kavita":
                     client = self.kavita_client
                 # Any other source is not supported here
                 
                 if client and getattr(client, "is_configured", lambda: True)():
-                    # Resolve cache destination using the mapping's own filename
-                    if book.ebook_filename:
-                        cache_path = safe_cache_path(self.epub_cache_dir, book.ebook_filename)
+                    # ``ebook_filename`` is mutable external metadata. Keep using
+                    # the original local cache name when a source-side rename is
+                    # reconciled so filename drift alone does not redownload bytes
+                    # or change the KoSync document identity.
+                    local_filename = book.original_ebook_filename or book.ebook_filename
+                    if local_filename:
+                        cache_path = safe_cache_path(self.epub_cache_dir, local_filename)
                         if cache_path:
                             # Return cached file if it exists and is substantial
                             if cache_path.exists() and cache_path.stat().st_size > 1024:
@@ -226,4 +231,3 @@ class LibraryService:
             
         except Exception as e:
             logger.error(f"   ❌ Library sync failed: {e}", exc_info=True)
-
