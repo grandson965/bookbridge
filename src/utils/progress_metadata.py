@@ -152,3 +152,14 @@ def get_kosync_approved_rewind_at(state: object) -> Optional[float]:
     except (TypeError, ValueError):
         pass
     return None
+
+
+def get_kosync_authoritative_put_at(state: object) -> Optional[float]:
+    """Read the last accepted real-device KoSync PUT cutoff."""
+    try:
+        locator = json.loads(getattr(state, "locator_json", None) or "{}")
+        if isinstance(locator, dict):
+            return parse_service_timestamp(locator.get("kosync_authoritative_put_at"))
+    except (TypeError, ValueError):
+        pass
+    return None

@@ -15,7 +15,11 @@ from src.utils.kosync_canonical import (
     prewarm_xpath_order_cache,
     resolve_canonical_position,
 )
-from src.utils.progress_metadata import get_kosync_approved_rewind_at, parse_service_timestamp
+from src.utils.progress_metadata import (
+    get_kosync_approved_rewind_at,
+    get_kosync_authoritative_put_at,
+    parse_service_timestamp,
+)
 from src.sync_clients.sync_client_interface import SyncClient, SyncResult, UpdateProgressRequest, ServiceState
 
 logger = logging.getLogger(__name__)
@@ -86,6 +90,9 @@ class KoSyncSyncClient(SyncClient):
         rewind_at = get_kosync_approved_rewind_at(prev_state)
         if rewind_at is not None:
             current["kosync_approved_rewind_at"] = rewind_at
+        authoritative_put_at = get_kosync_authoritative_put_at(prev_state)
+        if authoritative_put_at is not None:
+            current["kosync_authoritative_put_at"] = authoritative_put_at
         # The KoSync GET response carries the stored device-PUT timestamp —
         # the service's own "position last changed" signal (0 = never).
         service_updated_at = parse_service_timestamp(ko_metadata.get("timestamp"))
@@ -379,6 +386,10 @@ class KoSyncSyncClient(SyncClient):
             request.current_state.current.get("kosync_approved_rewind_at")
             if request.current_state else None
         )
+        authoritative_put_at = (
+            request.current_state.current.get("kosync_authoritative_put_at")
+            if request.current_state else None
+        )
         success = self.kosync_client.update_progress(ko_id, pct, safe_xpath)
         updated_state = {
             'pct': pct,
@@ -386,6 +397,8 @@ class KoSyncSyncClient(SyncClient):
         }
         if success and rewind_at is not None:
             updated_state["kosync_approved_rewind_at"] = rewind_at
+        if success and authoritative_put_at is not None:
+            updated_state["kosync_authoritative_put_at"] = authoritative_put_at
         if canonical_index is not None and canonical_file_key:
             # Pre-resolve the current device-vs-new-bridge pair off the GET path.
             # Failure is contained; #386's existing GET fallback remains intact.
