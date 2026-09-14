@@ -27,7 +27,7 @@ from src.utils.config_loader import env_truthy
 from src.utils.kosync_canonical import load_persisted_pair
 from src.utils.kosync_headers import hash_kosync_key
 from src.utils.progress_metadata import get_kosync_authoritative_put_at, parse_service_timestamp
-from src.utils.time_utils import utcnow
+from src.utils.time_utils import datetime_to_epoch, utcnow
 from src.utils.user_context import set_current_user_id, reset_current_user_id
 from src.utils.user_config import (
     _ALLOW_GLOBAL_FALLBACK_KEY,
@@ -1326,7 +1326,7 @@ def kosync_get_progress(doc_id):
                 "document": doc_id,
                 "percentage": float(progress_row.percentage),
                 "progress": progress_row.progress or "",
-                "timestamp": int(progress_row.timestamp.timestamp()) if progress_row.timestamp else 0
+                "timestamp": int(datetime_to_epoch(progress_row.timestamp)) if progress_row.timestamp else 0
             }
             response_data.update(
                 _recent_external_kosync_put_metadata(
@@ -1612,7 +1612,7 @@ def _record_user_kosync_state(book, percentage, progress, timestamp, user_id):
     """Persist an accepted real-device KoSync PUT as the current book position."""
     if not book:
         return
-    authoritative_at = timestamp.timestamp() if timestamp else time.time()
+    authoritative_at = datetime_to_epoch(timestamp) if timestamp else time.time()
     try:
         _database_service.save_state(State(
             abs_id=book.abs_id,
@@ -1705,7 +1705,7 @@ def kosync_put_progress():
             logger.info(f"KOSync: Ignored progress from '{device}' for doc {doc_hash} (user has higher: {baseline_pct:.2f}% vs new {new_pct:.2f}%)")
             return jsonify({
                 "document": doc_hash,
-                "timestamp": int(baseline.timestamp.timestamp()) if baseline and baseline.timestamp else int(now.timestamp())
+                "timestamp": int(datetime_to_epoch(baseline.timestamp)) if baseline and baseline.timestamp else int(datetime_to_epoch(now))
             }), 200
 
     if kosync_doc is None:
@@ -1825,7 +1825,7 @@ def kosync_put_progress():
     response_timestamp = now.isoformat() + "Z"
     if device and device.lower() == "booknexus":
         # BookNexus expects an integer timestamp (Unix epoch)
-        response_timestamp = int(now.timestamp())
+        response_timestamp = int(datetime_to_epoch(now))
 
     return jsonify({
         "document": doc_hash,
@@ -2992,7 +2992,7 @@ def _respond_from_book_states(doc_id, book):
             "device": "abs-kosync-bridge", "device_id": "abs-kosync-bridge",
             "document": doc_id, "percentage": float(recent_doc.percentage),
             "progress": recent_doc.progress or "",
-            "timestamp": int(recent_doc.timestamp.timestamp()) if recent_doc.timestamp else 0,
+            "timestamp": int(datetime_to_epoch(recent_doc.timestamp)) if recent_doc.timestamp else 0,
         }
         response_data.update(_recent_external_kosync_put_metadata(
             recent_doc.document_hash, response_data["percentage"], user_id
@@ -3138,7 +3138,7 @@ def _respond_from_book_states(doc_id, book):
                 "document": doc_id,
                 "percentage": float(best_doc.percentage),
                 "progress": best_doc.progress or "",
-                "timestamp": int(best_doc.timestamp.timestamp()) if best_doc.timestamp else 0
+                "timestamp": int(datetime_to_epoch(best_doc.timestamp)) if best_doc.timestamp else 0
             }
             response_data.update(
                 _recent_external_kosync_put_metadata(

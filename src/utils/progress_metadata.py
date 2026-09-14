@@ -20,8 +20,10 @@ This module is capture-only: nothing here influences leader selection.
 
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Optional
+
+from src.utils.time_utils import datetime_to_epoch
 
 logger = logging.getLogger(__name__)
 
@@ -64,15 +66,13 @@ def parse_service_timestamp(value) -> Optional[float]:
     candidate = text.replace("Z", "+00:00")
     for parser in (
         lambda t: datetime.fromisoformat(t),
-        lambda t: datetime.strptime(t, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc),
+        lambda t: datetime.strptime(t, "%Y-%m-%d %H:%M:%S"),
     ):
         try:
             parsed = parser(candidate)
         except ValueError:
             continue
-        if parsed.tzinfo is None:
-            parsed = parsed.replace(tzinfo=timezone.utc)
-        return parsed.timestamp()
+        return datetime_to_epoch(parsed)
 
     logger.debug("Unparseable service timestamp: %r", value)
     return None
