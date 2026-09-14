@@ -135,6 +135,13 @@ All notable changes to BookBridge will be documented in this file.
 
 ### Fixed
 
+- **Use the latest reader action across linked KoSync files.** When the same book is
+  linked through more than one reader-file hash, a fresh device PUT now wins over an
+  older sibling position—even when that sibling is further ahead. A later synced
+  position still takes priority, preventing a stale reader from pulling progress back.
+  Controlled by **Prefer the Latest Reader Action** under Settings → KoSync → Advanced
+  cross-device progress, on by default.
+
 - **Show Grimmory ebook covers through its book media endpoint (#435).** Ebook
   covers use the book ID rather than the audiobook file-cover route.
 - **Keep Grimmory reads, writes, and cached books tied to the selected ID (#437).**
