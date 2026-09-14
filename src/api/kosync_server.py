@@ -11,6 +11,7 @@ import threading
 import time
 import zipfile
 from collections import OrderedDict
+from collections.abc import Iterable
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from functools import wraps
@@ -26,7 +27,13 @@ from src.utils.cache_paths import safe_cache_path
 from src.utils.config_loader import env_truthy
 from src.utils.kosync_canonical import load_persisted_pair
 from src.utils.kosync_headers import hash_kosync_key
-from src.utils.progress_metadata import get_kosync_approved_rewind_at, parse_service_timestamp, state_metadata_kwargs
+from src.utils.progress_metadata import (
+    get_kosync_approved_rewind_at,
+    get_kosync_authoritative_put_at,
+    get_state_locator_metadata,
+    parse_service_timestamp,
+    state_metadata_kwargs,
+)
 from src.utils.fixed_page_progress import is_cbz_book, page_from_persisted_state
 from src.utils.time_utils import datetime_to_epoch, utcnow
 from src.utils.user_context import set_current_user_id, reset_current_user_id
@@ -234,6 +241,51 @@ def _recent_external_kosync_put_metadata(document_hash: str | None, percentage=N
         "_bridge_recent_external_put_device": entry.get("device") or "",
         "_bridge_recent_external_put_device_id": entry.get("device_id") or "",
     }
+
+
+def _latest_authoritative_kosync_put_document(
+    documents: Optional[Iterable[object]],
+    kosync_state: object,
+) -> Optional[object]:
+    """Return the persisted latest device PUT unless a newer sync replaced it."""
+    if not env_truthy("KOSYNC_SIBLING_LAST_WRITE_WINS", "true"):
+        return None
+    ttl = _recent_external_put_ttl_seconds()
+    authoritative_at = get_kosync_authoritative_put_at(kosync_state)
+    if ttl <= 0 or authoritative_at is None or time.time() - authoritative_at > ttl:
+        return None
+
+    # The PUT save uses an integer last_updated while its cutoff retains
+    # sub-second precision. A later sync save is therefore strictly newer; the
+    # original PUT save is equal to or slightly earlier than its own cutoff.
+    state_saved_at = parse_service_timestamp(getattr(kosync_state, "last_updated", None))
+    if state_saved_at is not None and state_saved_at > authoritative_at + 0.001:
+        return None
+
+    try:
+        authoritative_pct = float(getattr(kosync_state, "percentage", 0) or 0)
+    except (TypeError, ValueError):
+        return None
+
+    latest_doc = None
+    latest_at = float("-inf")
+    for device_doc in documents or []:
+        device_at = parse_service_timestamp(getattr(device_doc, "timestamp", None))
+        try:
+            device_pct = float(getattr(device_doc, "percentage", 0) or 0)
+        except (TypeError, ValueError):
+            continue
+        if (
+            device_at is None
+            or device_at < authoritative_at - 1.0
+            or abs(device_pct - authoritative_pct) > 0.0001
+        ):
+            continue
+        if device_at > latest_at:
+            latest_at = device_at
+            latest_doc = device_doc
+    return latest_doc
+
 
 _last_device_sync_activity: float = 0.0
 _MANIFEST_CACHE_FILENAME = "device_sync_manifest.json"
@@ -1597,25 +1649,29 @@ def _auto_map_ebook_to_audiobook(doc_hash_val, epub_filename, candidate, reason)
 
 
 def _record_user_kosync_state(book, percentage, progress, timestamp, user_id):
-    """Persist a KoSync PUT into the per-user State table.
+    """Persist an accepted real-device KoSync PUT as the current position.
 
     The kosync_documents row is keyed only by document hash, so two users reading
     the same EPUB share that transient row. State is keyed by user and is the
-    durable isolation boundary for subsequent GETs and sync cycles.
+    durable isolation boundary for subsequent GETs and sync cycles. Its locator
+    metadata also keeps the PUT cutoff without discarding existing rewind/page data.
     """
     if not book or user_id is None:
         return
     try:
-        metadata = {}
+        authoritative_at = parse_service_timestamp(timestamp) if timestamp else None
+        if authoritative_at is None:
+            authoritative_at = time.time()
+        previous = _database_service.get_state(book.abs_id, "kosync", user_id=user_id)
+        locator_metadata = get_state_locator_metadata(previous)
+        locator_metadata["kosync_authoritative_put_at"] = authoritative_at
         if is_cbz_book(book):
-            previous = _database_service.get_state(book.abs_id, "kosync", user_id=user_id)
             # PUT updates the wire position immediately. Retain the last synced
             # page until the cycle consumes it, including across several PUTs,
             # so a single page turn is still detectable when its pct delta is 0.
-            metadata = state_metadata_kwargs({
-                "page": page_from_persisted_state(previous),
-                "kosync_approved_rewind_at": get_kosync_approved_rewind_at(previous),
-            })
+            locator_metadata["page"] = page_from_persisted_state(previous)
+            locator_metadata["kosync_approved_rewind_at"] = get_kosync_approved_rewind_at(previous)
+        metadata = state_metadata_kwargs(locator_metadata)
         _database_service.save_state(State(
             abs_id=book.abs_id,
             client_name="kosync",
@@ -1829,9 +1885,8 @@ def kosync_put_progress():
             )
 
     if linked_book:
-        # NOTE: We intentionally do NOT update book_states here.
-        # The sync cycle is the only thing that should update book_states.
-        # This ensures proper delta detection between cycles.
+        # The external PUT was captured above. Do not perform a second generic
+        # State update here; the sync cycle remains responsible for later writes.
         logger.debug(f"KOSync: Updated linked book '{linked_book.abs_title}' to {percentage:.2%}")
 
         # Debounce sync trigger — wait until the reader stops turning pages
@@ -3040,6 +3095,55 @@ def _respond_from_book_states(doc_id, book):
                 logger.info(
                     f"KOSync: Ignoring stale device position {float(device_doc.percentage):.2%} for {doc_id} — "
                     f"it predates the approved rewind; keeping the bridge-synced position {synced_pct:.2%}"
+                )
+            else:
+                eligible_docs.append(device_doc)
+        docs_with_progress = eligible_docs
+
+    recent_doc = _latest_authoritative_kosync_put_document(docs_with_progress, kosync_state)
+    if recent_doc is not None:
+        logger.info(
+            "KOSync: Preferring latest device PUT for %s via sibling hash %s (%.2f%%)",
+            doc_id,
+            recent_doc.document_hash,
+            float(recent_doc.percentage) * 100.0,
+        )
+        poison_pill = _suppress_empty_progress_response(
+            doc_id, float(recent_doc.percentage), recent_doc.progress
+        )
+        if poison_pill is not None:
+            return poison_pill
+        response_data = {
+            "device": "abs-kosync-bridge",
+            "device_id": "abs-kosync-bridge",
+            "document": doc_id,
+            "percentage": float(recent_doc.percentage),
+            "progress": recent_doc.progress or "",
+            "timestamp": int(parse_service_timestamp(recent_doc.timestamp) or 0),
+        }
+        response_data.update(
+            _recent_external_kosync_put_metadata(
+                recent_doc.document_hash,
+                response_data["percentage"],
+                user_id,
+            )
+        )
+        return jsonify(response_data), 200
+
+    authoritative_put_at = get_kosync_authoritative_put_at(kosync_state)
+    if (
+        env_truthy("KOSYNC_SIBLING_LAST_WRITE_WINS", "true")
+        and authoritative_put_at is not None
+    ):
+        eligible_docs = []
+        for device_doc in docs_with_progress:
+            device_at = parse_service_timestamp(getattr(device_doc, "timestamp", None))
+            if device_at is not None and device_at < authoritative_put_at - 1.0:
+                logger.info(
+                    "KOSync: Ignoring sibling position %.2f%% for %s — it predates "
+                    "the latest accepted device PUT",
+                    float(device_doc.percentage) * 100.0,
+                    doc_id,
                 )
             else:
                 eligible_docs.append(device_doc)

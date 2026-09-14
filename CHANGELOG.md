@@ -135,6 +135,13 @@ All notable changes to BookBridge will be documented in this file.
 
 ### Fixed
 
+- **Use the latest reader action across linked KoSync files.** When the same book is
+  linked through more than one reader-file hash, a fresh device PUT now wins over an
+  older sibling position—even when that sibling is further ahead. A later synced
+  position still takes priority, preventing a stale reader from pulling progress back.
+  Controlled by **Prefer the Latest Reader Action** under Settings → KoSync → Advanced
+  cross-device progress, on by default.
+
 - **Keep BookOrbit audiobook polling working after its playback API update.**
   BookOrbit's new audiobook reader replaced the old per-book audio-progress route
   with revisioned playback state and manifest asset IDs. BookBridge now reads and

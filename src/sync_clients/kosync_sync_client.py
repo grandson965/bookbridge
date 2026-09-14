@@ -23,7 +23,11 @@ from src.utils.kosync_canonical import (
     prewarm_xpath_order_cache,
     resolve_canonical_position,
 )
-from src.utils.progress_metadata import get_kosync_approved_rewind_at, parse_service_timestamp
+from src.utils.progress_metadata import (
+    get_kosync_approved_rewind_at,
+    get_kosync_authoritative_put_at,
+    parse_service_timestamp,
+)
 from src.sync_clients.sync_client_interface import SyncClient, SyncResult, UpdateProgressRequest, ServiceState
 
 logger = logging.getLogger(__name__)
@@ -143,6 +147,9 @@ class KoSyncSyncClient(SyncClient):
         rewind_at = get_kosync_approved_rewind_at(prev_state)
         if rewind_at is not None:
             current["kosync_approved_rewind_at"] = rewind_at
+        authoritative_put_at = get_kosync_authoritative_put_at(prev_state)
+        if authoritative_put_at is not None:
+            current["kosync_authoritative_put_at"] = authoritative_put_at
         if self.supports_fixed_page_progress() and is_cbz_book(book):
             current["page"] = coerce_page(ko_xpath)
             current["_previous_page"] = page_from_persisted_state(prev_state)
@@ -375,6 +382,10 @@ class KoSyncSyncClient(SyncClient):
             request.current_state.current.get("kosync_approved_rewind_at")
             if request.current_state else None
         )
+        authoritative_put_at = (
+            request.current_state.current.get("kosync_authoritative_put_at")
+            if request.current_state else None
+        )
 
         epub = (
             (getattr(book, "original_ebook_filename", None) or getattr(book, "ebook_filename", None))
@@ -436,6 +447,8 @@ class KoSyncSyncClient(SyncClient):
             updated_state = {'pct': pct, 'xpath': page_progress, 'page': coerce_page(page_progress)}
             if success and rewind_at is not None:
                 updated_state["kosync_approved_rewind_at"] = rewind_at
+            if success and authoritative_put_at is not None:
+                updated_state["kosync_authoritative_put_at"] = authoritative_put_at
             return SyncResult(pct, success, updated_state)
 
         # Always collapse generated KoSync positions to block-level XPointers.
@@ -507,6 +520,8 @@ class KoSyncSyncClient(SyncClient):
         }
         if success and rewind_at is not None:
             updated_state["kosync_approved_rewind_at"] = rewind_at
+        if success and authoritative_put_at is not None:
+            updated_state["kosync_authoritative_put_at"] = authoritative_put_at
         if canonical_index is not None and canonical_file_key:
             # Pre-resolve the current device-vs-new-bridge pair off the GET path.
             # Failure is contained; #386's existing GET fallback remains intact.
