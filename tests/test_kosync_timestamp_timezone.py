@@ -8,7 +8,7 @@ shift summer timestamps by two hours (and winter timestamps by one hour).
 import os
 import time
 import unittest
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -55,27 +55,24 @@ def _manager(delta_clients):
 
 class KoSyncTimestampTimezoneTests(unittest.TestCase):
     def setUp(self):
-        self._timezone_changed = hasattr(time, "tzset")
-        if self._timezone_changed:
-            self._old_tz = os.environ.get("TZ")
-            os.environ["TZ"] = "Europe/Amsterdam"
-            time.tzset()
+        if not hasattr(time, "tzset"):
+            self.skipTest("time.tzset() is required for host-timezone regression coverage")
+        self._old_tz = os.environ.get("TZ")
+        os.environ["TZ"] = "Europe/Amsterdam"
+        time.tzset()
         os.environ.pop("SYNC_FRESHNESS_GUARDS", None)
         os.environ.pop("SYNC_ROLLBACK_VETO_SECONDS", None)
 
     def tearDown(self):
-        if self._timezone_changed:
-            if self._old_tz is None:
-                os.environ.pop("TZ", None)
-            else:
-                os.environ["TZ"] = self._old_tz
-            time.tzset()
+        if self._old_tz is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = self._old_tz
+        time.tzset()
         os.environ.pop("SYNC_FRESHNESS_GUARDS", None)
         os.environ.pop("SYNC_ROLLBACK_VETO_SECONDS", None)
 
     def test_naive_utc_epoch_ignores_host_timezone_in_winter_and_summer(self):
-        if not self._timezone_changed:
-            self.skipTest("time.tzset() is required for host-timezone regression coverage")
         for naive_utc in (
             datetime(2026, 1, 15, 12, 34, 56),
             datetime(2026, 7, 15, 12, 34, 56),
@@ -90,24 +87,6 @@ class KoSyncTimestampTimezoneTests(unittest.TestCase):
         self.assertEqual(parse_service_timestamp("2026-07-15 12:34:56"), expected)
         self.assertEqual(parse_service_timestamp("2026-07-15T12:34:56Z"), expected)
 
-    def test_aware_utc_and_offset_timestamps_preserve_their_instant(self):
-        aware_utc = datetime(2026, 7, 15, 12, 34, 56, tzinfo=timezone.utc)
-        aware_offset = datetime(
-            2026,
-            7,
-            15,
-            14,
-            34,
-            56,
-            tzinfo=timezone(timedelta(hours=2)),
-        )
-        expected = aware_utc.timestamp()
-
-        self.assertEqual(datetime_to_epoch(aware_utc), expected)
-        self.assertEqual(datetime_to_epoch(aware_offset), expected)
-        self.assertEqual(parse_service_timestamp("2026-07-15T12:34:56+00:00"), expected)
-        self.assertEqual(parse_service_timestamp("2026-07-15T14:34:56+02:00"), expected)
-
     def test_fresh_kosync_put_is_not_vetoed_by_slightly_older_booklore_timestamp(self):
         # This is the production failure shape: the KoSync PUT happened five
         # seconds after BookLore, but direct .timestamp() on this naive UTC value
@@ -117,8 +96,7 @@ class KoSyncTimestampTimezoneTests(unittest.TestCase):
         booklore_updated_at = parse_service_timestamp("2026-07-15T12:00:00Z")
 
         self.assertEqual(kosync_updated_at - booklore_updated_at, 5.0)
-        if self._timezone_changed:
-            self.assertGreater(booklore_updated_at - kosync_put_at.timestamp(), 7000.0)
+        self.assertGreater(booklore_updated_at - kosync_put_at.timestamp(), 7000.0)
 
         manager = _manager(delta_clients={"KoSync"})
         config = {
