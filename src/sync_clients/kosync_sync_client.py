@@ -25,6 +25,7 @@ from src.utils.kosync_canonical import (
 )
 from src.utils.progress_metadata import (
     get_kosync_approved_rewind_at,
+    get_kosync_authoritative_put_metadata,
     parse_service_timestamp,
 )
 from src.sync_clients.sync_client_interface import SyncClient, SyncResult, UpdateProgressRequest, ServiceState
@@ -146,6 +147,13 @@ class KoSyncSyncClient(SyncClient):
         rewind_at = get_kosync_approved_rewind_at(prev_state)
         if rewind_at is not None:
             current["kosync_approved_rewind_at"] = rewind_at
+        authority = get_kosync_authoritative_put_metadata(prev_state)
+        if authority and abs(float(ko_pct) - authority["percentage"]) <= 0.0001:
+            current.update({
+                "kosync_authoritative_put_at": authority["timestamp"],
+                "kosync_authoritative_put_hash": authority["document_hash"],
+                "kosync_authoritative_put_pct": authority["percentage"],
+            })
         if self.supports_fixed_page_progress() and is_cbz_book(book):
             current["page"] = coerce_page(ko_xpath)
             current["_previous_page"] = page_from_persisted_state(prev_state)

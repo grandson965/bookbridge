@@ -10,6 +10,7 @@ from flask import Flask, g
 from src.api import kosync_server
 from src.sync_clients.kosync_sync_client import KoSyncSyncClient
 from src.utils.config_loader import ALL_SETTINGS, DEFAULT_CONFIG
+from src.utils.progress_metadata import state_metadata_kwargs
 
 USER_ID = 7
 OTHER_USER_ID = 8
@@ -170,8 +171,9 @@ def test_newer_synced_state_overrides_old_confirmed_put_even_if_metadata_lingers
     assert data["progress"] == "synced-40"
 
 
-def test_confirmed_put_expires_with_recent_put_ttl(monkeypatch):
-    cutoff = time.time() - 5.0
+@pytest.mark.parametrize("recent_window", ["0", "1"])
+def test_confirmed_put_does_not_expire_with_recent_put_ttl(monkeypatch, recent_window):
+    cutoff = time.time() - 86400.0
     db = FakeDatabase(make_state(
         0.9137, "page-42", authoritative_at=cutoff,
         authoritative_hash=SIBLING_B, authoritative_pct=0.9137,
@@ -179,11 +181,11 @@ def test_confirmed_put_expires_with_recent_put_ttl(monkeypatch):
         make_row(SIBLING_A, 1.0, "page-58", cutoff - 30.0),
         make_row(SIBLING_B, 0.9137, "page-42", cutoff),
     ])
-    monkeypatch.setenv("KOSYNC_RECENT_EXTERNAL_PUT_SECONDS", "1")
+    monkeypatch.setenv("KOSYNC_RECENT_EXTERNAL_PUT_SECONDS", recent_window)
     data, status = respond(db)
     assert status == 200
-    assert data["percentage"] == pytest.approx(1.0)
-    assert data["progress"] == "page-58"
+    assert data["percentage"] == pytest.approx(0.9137)
+    assert data["progress"] == "page-42"
 
 
 def test_feature_flag_restores_furthest_wins(monkeypatch):
@@ -341,7 +343,7 @@ def test_external_cbz_put_preserves_page_and_approved_rewind_only():
     }
 
 
-def test_kosync_client_does_not_carry_temporary_authority_through_sync_state():
+def test_kosync_client_carries_authority_through_sync_state_and_restart():
     cutoff = time.time() - 3.0
     prev_state = make_state(
         0.5, "/body/DocFragment[1]/p.0", authoritative_at=cutoff,
@@ -349,8 +351,35 @@ def test_kosync_client_does_not_carry_temporary_authority_through_sync_state():
     )
     client = KoSyncSyncClient(FakeKoSyncApi(), SimpleNamespace())
     service_state = client.get_service_state(make_book(), prev_state)
+    assert service_state.current["kosync_authoritative_put_at"] == pytest.approx(cutoff)
+    assert service_state.current["kosync_authoritative_put_hash"] == SIBLING_B
+    assert service_state.current["kosync_authoritative_put_pct"] == pytest.approx(0.5)
+
+    persisted = make_state(
+        service_state.current["pct"],
+        service_state.current["xpath"],
+        locator=json.loads(state_metadata_kwargs(service_state.current)["locator_json"]),
+    )
+    data, status = respond(FakeDatabase(persisted, [
+        make_row(SIBLING_A, 0.9, "reader-90", cutoff - 60.0),
+        make_row(SIBLING_B, 0.5, "/body/DocFragment[1]/p.0", cutoff),
+    ]))
+    assert status == 200
+    assert data["percentage"] == pytest.approx(0.5)
+
+
+def test_kosync_client_drops_authority_when_reported_position_moves():
+    cutoff = time.time() - 3.0
+    prev_state = make_state(
+        0.4, "/body/DocFragment[1]/p.0", authoritative_at=cutoff,
+        authoritative_hash=SIBLING_B, authoritative_pct=0.4,
+    )
+    client = KoSyncSyncClient(FakeKoSyncApi(), SimpleNamespace())
+    service_state = client.get_service_state(make_book(), prev_state)
+    assert service_state.current["pct"] == pytest.approx(0.5)
     assert "kosync_authoritative_put_at" not in service_state.current
     assert "kosync_authoritative_put_hash" not in service_state.current
+    assert "kosync_authoritative_put_pct" not in service_state.current
 
 
 def test_setting_is_registered_defaulted_boolean_and_rendered():
@@ -359,7 +388,7 @@ def test_setting_is_registered_defaulted_boolean_and_rendered():
     root = Path(__file__).parent.parent
     template = (root / "templates" / "settings.html").read_text(encoding="utf-8")
     assert 'name="KOSYNC_SIBLING_LAST_WRITE_WINS"' in template
-    assert "Prefer Confirmed Recent Reader Movement" in template
+    assert "Prefer Confirmed Reader Movement" in template
     web_source = (root / "src" / "web_server.py").read_text(encoding="utf-8")
     bool_block = web_source.split("bool_keys = [", 1)[1].split("]", 1)[0]
     assert "'KOSYNC_SIBLING_LAST_WRITE_WINS'" in bool_block

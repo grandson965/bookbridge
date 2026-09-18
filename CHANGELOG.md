@@ -145,9 +145,10 @@ This release runs database migrations automatically and ships BridgeSync **0.6.1
 
 - **Preserve confirmed reader movement across linked KoSync files.** When the same book
   is linked through more than one reader-file hash, continued movement from the same
-  reader can temporarily beat an older, further-ahead sibling instead of being undone
-  on the next GET. A first-open or unchanged stale position is not enough, and a later
-  synced state clears the preference. Controlled by **Prefer Confirmed Recent Reader
+  reader can beat an older, further-ahead sibling instead of being undone on the next
+  GET. The confirmed position remains authoritative across syncs and restarts until a
+  later position replaces it. A first-open or unchanged stale position is not enough.
+  Controlled by **Prefer Confirmed Reader
   Movement** under Settings → KoSync → Advanced cross-device progress. Related to #215.
 
 - **Keep BookOrbit audiobook polling working after its playback API update.**
