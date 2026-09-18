@@ -161,7 +161,7 @@ def get_state_locator_metadata(state: object) -> dict:
 
 
 def get_kosync_authoritative_put_metadata(state: object) -> dict:
-    """Return the exact reader PUT temporarily preferred across sibling hashes."""
+    """Return the exact reader PUT preferred while its state remains unchanged."""
     metadata = get_state_locator_metadata(state)
     authoritative_at = parse_service_timestamp(metadata.get("kosync_authoritative_put_at"))
     document_hash = str(metadata.get("kosync_authoritative_put_hash") or "").strip()

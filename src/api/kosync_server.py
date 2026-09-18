@@ -246,22 +246,20 @@ def _latest_authoritative_kosync_put_document(
     documents: Optional[Iterable[object]],
     kosync_state: object,
 ) -> Optional[object]:
-    """Return a recent confirmed reader movement for its exact sibling hash."""
+    """Return the confirmed reader movement bound to this exact state and hash."""
     if not env_truthy("KOSYNC_SIBLING_LAST_WRITE_WINS", "true"):
         return None
     if not env_truthy("SYNC_TRUST_CORROBORATED_REWIND", "true"):
         return None
 
     authority = get_kosync_authoritative_put_metadata(kosync_state)
-    ttl = _recent_external_put_ttl_seconds()
-    if not authority or ttl <= 0:
+    if not authority:
         return None
     authoritative_at = authority["timestamp"]
-    if time.time() - authoritative_at > ttl:
-        return None
 
-    # A synced state at another percentage has replaced the reader action even if
-    # an old metadata blob somehow survived the save that produced it.
+    # Authority is durable, but only while the persisted position still identifies
+    # the exact reader action that established it. Any later state movement breaks
+    # this binding without relying on a wall-clock expiry.
     try:
         state_pct = float(getattr(kosync_state, "percentage", 0) or 0)
     except (TypeError, ValueError):
